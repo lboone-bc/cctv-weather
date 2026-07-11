@@ -41,6 +41,9 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- NCDOT camera feeds are HLS (.m3u8) streams; hls.js plays them in browsers -->
+  <!-- without native HLS support (everything except Safari/iOS). -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script type="module" src="cameras.js"></script>
   <script type="module" src="weather.js"></script>
 </body>

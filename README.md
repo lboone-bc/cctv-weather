@@ -8,38 +8,48 @@ static assets).
 
 ## Status / open TODOs
 
-This project was scaffolded before a DriveNC developer API key existed, so
-one piece is unverified and should be the first thing checked once a key is
-in hand:
+The DriveNC Cameras API has been called live with a real key and all 14
+cameras confirmed working — see [Cameras](#cameras) below for how the
+mapping was resolved. Remaining items:
 
-- [ ] **Confirm the DriveNC Cameras API response shape for these specific
-      NCDOT cameras.** `src/worker.js` guesses at field names (`VideoUrl`,
-      `ImageUrl`, `SnapshotUrl`) based on DriveNC's public docs, which only
-      confirm a `Views[].Url` (viewer page link) and an often-empty
-      `Views[].VideoUrl` for *municipal* cameras. Once `DRIVENC_API_KEY` is
-      set, call `https://www.drivenc.gov/api/v2/get/cameras?key=...&format=json`
-      directly (e.g. with `curl`) and inspect a real NCDOT camera's JSON to see
-      what media field is actually populated (snapshot JPG vs. a stream URL),
-      then adjust `extractMedia()` in `src/worker.js` accordingly.
-    - Note: the sample DriveNC data seen during research used a numeric `Id`
-      (e.g. `4061`), not the GUIDs from the original drivenc.gov URLs
-      (`07a325cd-...`). The proxy currently matches on both `c.Id` and
-      `c.Guid` as a hedge — confirm which field the real response actually
-      uses and simplify the matching logic once known.
-- [ ] **Fix the duplicate camera GUID.** "US-25 — Old Airport Rd" was supplied
-      with the exact same GUID as "I-26 MM41"
-      (`1682cc9c-c58c-4485-a04b-b603ad8069f0`). Both tiles currently show the
-      I-26 MM41 camera. Get the correct GUID for Old Airport Rd and update it
-      in both `public/cameras.js` and `src/worker.js`.
-- [ ] Verify each camera's `drivenc.gov/{guid}` viewer page is actually
-      iframe-embeddable (no blocking `X-Frame-Options`/CSP) — this is the
-      fallback path used whenever the API doesn't return usable media, and is
-      also what renders before `/api/cameras` responds on first load.
+- [ ] Verify each camera's `drivenc.gov/map/Cctv/{id}` viewer page is
+      actually iframe-embeddable (no blocking `X-Frame-Options`/CSP) — this
+      is the fallback path used whenever `/api/cameras` hasn't responded yet
+      or a stream fails to play.
+- [ ] Watch the wall run for a while and confirm 14 simultaneous HLS streams
+      don't overload whatever device is driving the TV (a low-power
+      stick/smart-TV browser may struggle — if so, consider showing fewer
+      live streams at once and cycling the rest, or capping video
+      resolution).
+- [ ] Set `DRIVENC_API_KEY` as a secret in the Cloudflare dashboard (see
+      Setup below) so the deployed site — not just local dev — gets live
+      cameras instead of the iframe fallback.
 
-Until the API key is configured, every tile falls back to an `<iframe>` of
-its public `drivenc.gov` viewer page, so the wall is functional out of the
-box — it just upgrades to direct media once the key + verified field mapping
-are in place.
+Until the key is set in the deployed environment, every tile falls back to
+an `<iframe>` of its public `drivenc.gov` viewer page, so the wall is
+functional out of the box.
+
+### How the camera IDs were resolved
+
+The GUIDs from the original drivenc.gov URLs (e.g. `07a325cd-ac00-...`)
+**do not appear anywhere** in the DriveNC Cameras API response — that GUID
+scheme belongs only to the public site's client-side router. The API
+identifies cameras by a numeric `Id` instead. The 14 cameras above were
+matched by pulling the full API dataset (1,153 cameras) and cross-referencing
+each requested camera's road/mile-marker/cross-street against the API's
+`Location`, `Roadway`, `Direction`, and lat/lon fields for Buncombe and
+Henderson counties. Confirmed via a live `curl`:
+
+- Each camera's `Views[0].VideoUrl` is a working, publicly-reachable **HLS
+  (.m3u8) live stream** (no auth required) — e.g.
+  `https://cfase01.services.ncdot.gov:8887/chan-5378_l/index.m3u8` for I-26
+  MM37. `src/worker.js` and `public/cameras.js` were updated accordingly
+  (`renderHlsStream()` uses native HLS on Safari, `hls.js` everywhere else).
+- The exact "MM39" camera unit (Id 4851) has no video feed populated: the
+  nearest live camera (`CCTV13-I26-39.6E`, Id 5269) was used instead.
+- "US-25 Old Airport Rd" has its own real camera, `CCTV14-US25_OLDAIRPORT`
+  (Id 6103) — distinct from I-26 MM41, resolving the duplicate-GUID issue
+  from the original source list.
 
 ## Architecture
 
@@ -81,39 +91,44 @@ Browser (TV) ──> public/index.html / style.css / cameras.js / weather.js
   attribution link that's already in `index.html` — don't remove it.
 - No framework/build step for the front end. It's `public/index.html` +
   `public/style.css` + two ES modules (`public/cameras.js`,
-  `public/weather.js`) plus one Worker script for the DriveNC proxy. Kept
-  intentionally simple since this just needs to run unattended on a TV.
+  `public/weather.js`, the latter loading Leaflet + hls.js from CDNs) plus
+  one Worker script for the DriveNC proxy. Kept intentionally simple since
+  this just needs to run unattended on a TV.
 
 ## Cameras
 
 Priority camera (rendered larger, top of the grid):
 
-| Label | GUID |
-|---|---|
-| **I-26 MM37 — Long Shoals Rd** | `07a325cd-ac00-4a93-8a15-478338f71dbd` |
+| Label | DriveNC Id | Live stream |
+|---|---|---|
+| **I-26 MM37 — Long Shoals Rd** | `4208` | ✅ HLS confirmed |
 
-Remaining cameras:
+Remaining cameras (all confirmed with live HLS streams as of this writing):
 
-| Label | GUID |
-|---|---|
-| I-26 MM36 | `30a32301-7288-42ab-aec5-0686e9198ef6` |
-| I-26 MM39 | `ae534a09-3f42-40b1-b15e-33a07ae8c8ae` |
-| I-26 MM40 | `3d273c12-0bec-40d4-868c-1b8ee5ad434d` |
-| I-26 MM41 | `1682cc9c-c58c-4485-a04b-b603ad8069f0` |
-| I-26 MM44 — US-25 | `35916952-ece1-4fc9-8f86-fbccebf8e3c5` |
-| I-26 MM45 | `00bec6b8-bfe4-4f92-81ec-caa12f09fe11` |
-| US-25 — Old Airport Rd ⚠️ *duplicate GUID, needs correction* | `1682cc9c-c58c-4485-a04b-b603ad8069f0` |
-| US-25 — Airport Rd | `081e9880-28ba-4059-a657-bf0094b8b29a` |
-| US-25 — Long Shoals Rd | `45513374-a881-45f8-871d-1d09b4aa5a54` |
-| US-25 — Gerber Village | `dc042f71-f086-47cf-aaac-fe5d44accfe2` |
-| US-25 — Rock Hill Rd | `9e8d51bb-7d76-4230-abbe-5c87f52dce9e` |
-| Airport Rd — Fanning Bridge Rd | `cfb396d1-5a86-4cd6-a73c-eb934f75535e` |
-| Airport Rd — Ferncliff | `32d394f5-36ac-482d-88f7-606327300313` |
+| Label | DriveNC Id | Notes |
+|---|---|---|
+| I-26 MM36 | `6120` | |
+| I-26 MM39 | `5269` | nearest live camera; exact MM39 unit has no video feed |
+| I-26 MM40 | `4210` | |
+| I-26 MM41 | `4868` | |
+| I-26 MM44 — US-25 | `4876` | |
+| I-26 MM45 | `6101` | |
+| US-25 — Old Airport Rd | `6103` | resolved from the original duplicate-GUID entry |
+| US-25 — Airport Rd | `4221` | |
+| US-25 — Long Shoals Rd | `4224` | |
+| US-25 — Gerber Village | `4223` | |
+| US-25 — Rock Hill Rd | `4227` | |
+| Airport Rd — Fanning Bridge Rd | `4203` | |
+| Airport Rd — Ferncliff | `6100` | Roadway is tagged NC-280 in DriveNC's data |
+
+Viewer page (iframe fallback) for any camera: `https://www.drivenc.gov/map/Cctv/{id}`.
 
 To add/remove/reorder cameras: edit `CAMERAS` in `public/cameras.js` and
-`WANTED_CAMERA_IDS` in `src/worker.js` (both need the GUID; keep them in
-sync). Set `priority: true` on at most one camera in `public/cameras.js` for
-the large tile.
+`WANTED_CAMERA_IDS` in `src/worker.js` (both need the numeric DriveNC `Id`;
+keep them in sync). Set `priority: true` on at most one camera in
+`public/cameras.js` for the large tile. To find a new camera's Id, query the
+DriveNC API with a valid key and search by `Location`/`Roadway`/lat-lon —
+there's no reliable way to derive it from a drivenc.gov viewer URL.
 
 ## Setup
 
@@ -169,3 +184,4 @@ refreshes its own data on intervals, so it's meant to just be left open.
 | [RainViewer Weather Maps API](https://www.rainviewer.com/api.html) | Radar tiles | No | Free for personal/small-scale use; attribution required and present in `index.html` |
 | [Leaflet](https://leafletjs.com/) | Radar map rendering | No | Loaded via CDN |
 | [CARTO dark basemap](https://carto.com/basemaps) | Radar map base tiles | No | Free tier, loaded via CDN |
+| [hls.js](https://github.com/video-dev/hls.js) | Playing NCDOT's HLS camera streams | No | Loaded via CDN; not needed on Safari/iOS, which play HLS natively |

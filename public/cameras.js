@@ -1,36 +1,32 @@
 // Camera list for the I-26 / US-25 corridor near Arden, NC.
-// `id` is the DriveNC camera GUID (matches the drivenc.gov/{guid} viewer page).
-// `viewerUrl` is that public viewer page, used as a fallback if the DriveNC
-// Cameras API (proxied via /api/cameras) doesn't return a direct media URL,
-// or if the API key hasn't been configured yet.
 //
-// NOTE: "US-25 Old Airport Rd" was supplied with the exact same GUID as
-// "I-26 MM41" (1682cc9c-c58c-4485-a04b-b603ad8069f0). That's almost certainly
-// a copy/paste mistake in the source list — both tiles will show the I-26
-// MM41 camera until the correct GUID is supplied for Old Airport Rd.
+// `id` is DriveNC's numeric camera Id from their official Cameras API
+// (NOT the GUID used in drivenc.gov's public viewer-page URLs — that GUID
+// scheme doesn't appear anywhere in the API dataset; these numeric Ids were
+// matched by cross-referencing camera location names/coordinates against
+// the full API dump. See README for details.)
 const CAMERAS = [
-  { id: "07a325cd-ac00-4a93-8a15-478338f71dbd", label: "I-26 MM37 — Long Shoals Rd", priority: true },
-  { id: "30a32301-7288-42ab-aec5-0686e9198ef6", label: "I-26 MM36" },
-  { id: "ae534a09-3f42-40b1-b15e-33a07ae8c8ae", label: "I-26 MM39" },
-  { id: "3d273c12-0bec-40d4-868c-1b8ee5ad434d", label: "I-26 MM40" },
-  { id: "1682cc9c-c58c-4485-a04b-b603ad8069f0", label: "I-26 MM41" },
-  { id: "35916952-ece1-4fc9-8f86-fbccebf8e3c5", label: "I-26 MM44 — US-25" },
-  { id: "00bec6b8-bfe4-4f92-81ec-caa12f09fe11", label: "I-26 MM45" },
-  { id: "1682cc9c-c58c-4485-a04b-b603ad8069f0", label: "US-25 — Old Airport Rd (verify GUID — duplicate of MM41)" },
-  { id: "081e9880-28ba-4059-a657-bf0094b8b29a", label: "US-25 — Airport Rd" },
-  { id: "45513374-a881-45f8-871d-1d09b4aa5a54", label: "US-25 — Long Shoals Rd" },
-  { id: "dc042f71-f086-47cf-aaac-fe5d44accfe2", label: "US-25 — Gerber Village" },
-  { id: "9e8d51bb-7d76-4230-abbe-5c87f52dce9e", label: "US-25 — Rock Hill Rd" },
-  { id: "cfb396d1-5a86-4cd6-a73c-eb934f75535e", label: "Airport Rd — Fanning Bridge Rd" },
-  { id: "32d394f5-36ac-482d-88f7-606327300313", label: "Airport Rd — Ferncliff" },
+  { id: 4208, label: "I-26 MM37 — Long Shoals Rd", priority: true },
+  { id: 6120, label: "I-26 MM36" },
+  { id: 5269, label: "I-26 MM39" }, // nearest live camera to MM39 (exact MM39 unit has no video feed)
+  { id: 4210, label: "I-26 MM40" },
+  { id: 4868, label: "I-26 MM41" },
+  { id: 4876, label: "I-26 MM44 — US-25" },
+  { id: 6101, label: "I-26 MM45" },
+  { id: 6103, label: "US-25 — Old Airport Rd" },
+  { id: 4221, label: "US-25 — Airport Rd" },
+  { id: 4224, label: "US-25 — Long Shoals Rd" },
+  { id: 4223, label: "US-25 — Gerber Village" },
+  { id: 4227, label: "US-25 — Rock Hill Rd" },
+  { id: 4203, label: "Airport Rd — Fanning Bridge Rd" },
+  { id: 6100, label: "Airport Rd — Ferncliff" },
 ];
 
 const CAMERA_API_URL = "/api/cameras";
 const CAMERA_META_REFRESH_MS = 90_000; // how often we re-ask the proxy for fresh media URLs
-const IMAGE_REFRESH_MS = 8_000; // how often we bust the cache on a still-image feed
 
 function viewerUrl(id) {
-  return `https://www.drivenc.gov/${id}`;
+  return `https://www.drivenc.gov/map/Cctv/${id}`;
 }
 
 function buildTile(cam) {
@@ -83,22 +79,48 @@ function renderImage(tile, imageUrl) {
   img.src = `${imageUrl}${sep}_ts=${Date.now()}`;
 }
 
-function renderStream(tile, streamUrl) {
-  // Treat as an MJPEG-style stream an <img> tag can consume directly.
-  // (True HLS/.m3u8 sources would need hls.js — add if a DriveNC camera
-  // turns out to return one; none confirmed as of writing.)
-  tile.classList.add("live");
-  tile.classList.remove("error");
+// NCDOT camera feeds are HLS (.m3u8) live streams. Safari/iOS play HLS
+// natively via <video src>; everywhere else needs hls.js (loaded in index.html).
+function renderHlsStream(tile, streamUrl) {
   const media = tile.querySelector(".media");
-  let img = media.querySelector("img.stream");
-  if (!img) {
-    media.innerHTML = "";
-    img = document.createElement("img");
-    img.className = "stream";
-    img.alt = tile.querySelector(".label").textContent;
-    media.appendChild(img);
+  const existing = media.querySelector("video");
+  if (existing && existing.dataset.src === streamUrl) {
+    return; // already playing this exact stream, nothing to do
   }
-  img.src = streamUrl;
+
+  media.innerHTML = "";
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.dataset.src = streamUrl;
+  media.appendChild(video);
+
+  const markLive = () => {
+    tile.classList.add("live");
+    tile.classList.remove("error");
+  };
+  const markFailed = () => {
+    console.warn(`HLS playback failed for camera ${tile.dataset.id}, falling back to viewer iframe`);
+    markError(tile);
+    renderFallbackIframe(tile);
+  };
+
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = streamUrl;
+    video.addEventListener("loadedmetadata", markLive, { once: true });
+    video.addEventListener("error", markFailed, { once: true });
+  } else if (window.Hls && window.Hls.isSupported()) {
+    const hls = new window.Hls({ liveSyncDurationCount: 3 });
+    hls.loadSource(streamUrl);
+    hls.attachMedia(video);
+    hls.on(window.Hls.Events.MANIFEST_PARSED, markLive);
+    hls.on(window.Hls.Events.ERROR, (_evt, data) => {
+      if (data.fatal) markFailed();
+    });
+  } else {
+    markFailed();
+  }
 }
 
 function markError(tile) {
@@ -117,7 +139,7 @@ async function refreshCameraMeta() {
     payload = [];
   }
 
-  const byId = new Map(payload.map((c) => [c.id, c]));
+  const byId = new Map(payload.map((c) => [String(c.id), c]));
 
   document.querySelectorAll(".camera-tile").forEach((tile) => {
     const id = tile.dataset.id;
@@ -130,7 +152,7 @@ async function refreshCameraMeta() {
 
     try {
       if (data.videoUrl) {
-        renderStream(tile, data.videoUrl);
+        renderHlsStream(tile, data.videoUrl);
       } else {
         renderImage(tile, data.imageUrl);
       }
@@ -142,13 +164,6 @@ async function refreshCameraMeta() {
   });
 }
 
-function bustImageCaches() {
-  document.querySelectorAll(".camera-tile.live img:not(.stream)").forEach((img) => {
-    const [base] = img.src.split("?_ts=");
-    img.src = `${base}?_ts=${Date.now()}`;
-  });
-}
-
 function init() {
   const grid = document.getElementById("camera-grid");
   for (const cam of CAMERAS) {
@@ -156,12 +171,11 @@ function init() {
   }
 
   // Render fallback iframes immediately so the wall is useful the instant
-  // it loads, then upgrade tiles to live media once /api/cameras responds.
+  // it loads, then upgrade tiles to live HLS streams once /api/cameras responds.
   document.querySelectorAll(".camera-tile").forEach(renderFallbackIframe);
 
   refreshCameraMeta();
   setInterval(refreshCameraMeta, CAMERA_META_REFRESH_MS);
-  setInterval(bustImageCaches, IMAGE_REFRESH_MS);
 }
 
 document.addEventListener("DOMContentLoaded", init);

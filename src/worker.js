@@ -2,26 +2,31 @@
 // project's Git integration actually runs (`npx wrangler deploy`), which
 // does NOT understand the old Pages-only `/functions` directory convention.
 // This Worker does two things:
-//   1. Handles GET /api/cameras itself (the DriveNC proxy/cache, unchanged
-//      in behavior from the previous functions/api/cameras.js version).
+//   1. Handles GET /api/cameras itself (the DriveNC proxy/cache).
 //   2. Falls through to the ASSETS binding for everything else, which
 //      serves the static site out of `public/` (configured in
 //      wrangler.jsonc).
 
+// DriveNC's official Cameras API uses a numeric `Id` per camera — the GUIDs
+// used in drivenc.gov's public viewer-page URLs do NOT appear anywhere in
+// this API's data. These Ids were matched by cross-referencing camera
+// location names/coordinates against the full API dump (see README).
+// Confirmed field: Views[0].VideoUrl is a live HLS (.m3u8) stream.
 const WANTED_CAMERA_IDS = [
-  "07a325cd-ac00-4a93-8a15-478338f71dbd", // I-26 MM37 — Long Shoals Rd (priority)
-  "30a32301-7288-42ab-aec5-0686e9198ef6", // I-26 MM36
-  "ae534a09-3f42-40b1-b15e-33a07ae8c8ae", // I-26 MM39
-  "3d273c12-0bec-40d4-868c-1b8ee5ad434d", // I-26 MM40
-  "1682cc9c-c58c-4485-a04b-b603ad8069f0", // I-26 MM41 (also currently mapped to "US-25 Old Airport Rd" — see public/cameras.js note)
-  "35916952-ece1-4fc9-8f86-fbccebf8e3c5", // I-26 MM44 — US-25
-  "00bec6b8-bfe4-4f92-81ec-caa12f09fe11", // I-26 MM45
-  "081e9880-28ba-4059-a657-bf0094b8b29a", // US-25 — Airport Rd
-  "45513374-a881-45f8-871d-1d09b4aa5a54", // US-25 — Long Shoals Rd
-  "dc042f71-f086-47cf-aaac-fe5d44accfe2", // US-25 — Gerber Village
-  "9e8d51bb-7d76-4230-abbe-5c87f52dce9e", // US-25 — Rock Hill Rd
-  "cfb396d1-5a86-4cd6-a73c-eb934f75535e", // Airport Rd — Fanning Bridge Rd
-  "32d394f5-36ac-482d-88f7-606327300313", // Airport Rd — Ferncliff
+  4208, // I-26 MM37 — Long Shoals Rd (priority)
+  6120, // I-26 MM36
+  5269, // I-26 MM39 (nearest live camera to MM39; exact MM39 unit has no video feed)
+  4210, // I-26 MM40
+  4868, // I-26 MM41
+  4876, // I-26 MM44 — US-25
+  6101, // I-26 MM45
+  6103, // US-25 — Old Airport Rd
+  4221, // US-25 — Airport Rd
+  4224, // US-25 — Long Shoals Rd
+  4223, // US-25 — Gerber Village
+  4227, // US-25 — Rock Hill Rd
+  4203, // Airport Rd — Fanning Bridge Rd
+  6100, // Airport Rd — Ferncliff
 ];
 
 const CACHE_TTL_MS = 90_000;
@@ -35,13 +40,8 @@ function extractMedia(camera) {
   const view = camera.Views?.[0] || {};
   return {
     id: camera.Id,
-    // DriveNC's documented sample data only confirms Views[].Url (a viewer
-    // page) and Views[].VideoUrl (often empty for municipal feeds). Field
-    // names below are best-guesses for the still-image case and should be
-    // confirmed against a real response for these NCDOT cameras, then
-    // trimmed to whatever's actually populated. See README TODOs.
-    videoUrl: view.VideoUrl || camera.VideoUrl || null,
-    imageUrl: view.ImageUrl || camera.ImageUrl || view.SnapshotUrl || null,
+    videoUrl: view.VideoUrl || null, // live HLS (.m3u8) stream
+    imageUrl: null, // none of our selected cameras use a still-image feed; kept for completeness
     viewerUrl: view.Url || null,
     status: view.Status || "Unknown",
   };
@@ -79,13 +79,10 @@ async function handleCamerasApi(env) {
     if (!upstream.ok) {
       throw new Error(`DriveNC API returned ${upstream.status}`);
     }
-    const body = await upstream.json();
-    const cameras = Array.isArray(body) ? body : body.Cameras || body.Result || [];
+    const cameras = await upstream.json();
 
     const wanted = new Set(WANTED_CAMERA_IDS);
-    const matched = cameras
-      .filter((c) => wanted.has(String(c.Id)) || wanted.has(String(c.Guid)))
-      .map(extractMedia);
+    const matched = cameras.filter((c) => wanted.has(c.Id)).map(extractMedia);
 
     cache = { data: matched, fetchedAt: now };
     return jsonResponse(matched);
