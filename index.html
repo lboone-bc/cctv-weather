@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>I-26 / Arden NC — CCTV &amp; Weather Wall</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>I-26 / US-25 Corridor — Live Traffic &amp; Weather</h1>
+    <div class="topbar-right">
+      <span id="conditions-chip" class="conditions-chip">—</span>
+      <span id="clock" class="clock">--:--</span>
+    </div>
+  </header>
+
+  <main class="wall">
+    <section class="cameras" id="camera-grid" aria-label="Live traffic cameras">
+      <!-- camera tiles injected by cameras.js -->
+    </section>
+
+    <aside class="weather" aria-label="Arden, NC weather">
+      <div class="panel current-conditions" id="current-conditions">
+        <h2>Arden, NC</h2>
+        <div class="current-loading">Loading current conditions…</div>
+      </div>
+
+      <div class="panel forecast" id="forecast">
+        <h2>3-Day Forecast</h2>
+        <div class="forecast-loading">Loading forecast…</div>
+      </div>
+
+      <div class="panel radar">
+        <h2>Radar</h2>
+        <div id="radar-map"></div>
+        <div class="radar-attribution">Radar data © <a href="https://www.rainviewer.com/" target="_blank" rel="noopener">RainViewer.com</a></div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script type="module" src="cameras.js"></script>
+  <script type="module" src="weather.js"></script>
+</body>
+</html>
