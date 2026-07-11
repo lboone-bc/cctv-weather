@@ -1,21 +1,19 @@
-// Cloudflare Pages Function: GET /api/cameras
-//
-// Proxies DriveNC's official Cameras API so the DriveNC developer key never
-// reaches the browser, and caches the result in-memory so multiple page
-// loads / refresh cycles don't blow DriveNC's 10-requests-per-60-seconds
-// throttle. Set DRIVENC_API_KEY as a Cloudflare Pages secret env var.
-//
-// If no key is configured, this returns an empty array (200 OK) rather than
-// an error — the front end (cameras.js) treats that as "no data yet" and
-// falls back to embedding each camera's public drivenc.gov viewer page in an
-// iframe, so the wall still works before the key is set up.
+// Single Worker entry point for the Cloudflare deploy pipeline that this
+// project's Git integration actually runs (`npx wrangler deploy`), which
+// does NOT understand the old Pages-only `/functions` directory convention.
+// This Worker does two things:
+//   1. Handles GET /api/cameras itself (the DriveNC proxy/cache, unchanged
+//      in behavior from the previous functions/api/cameras.js version).
+//   2. Falls through to the ASSETS binding for everything else, which
+//      serves the static site out of `public/` (configured in
+//      wrangler.jsonc).
 
 const WANTED_CAMERA_IDS = [
   "07a325cd-ac00-4a93-8a15-478338f71dbd", // I-26 MM37 — Long Shoals Rd (priority)
   "30a32301-7288-42ab-aec5-0686e9198ef6", // I-26 MM36
   "ae534a09-3f42-40b1-b15e-33a07ae8c8ae", // I-26 MM39
   "3d273c12-0bec-40d4-868c-1b8ee5ad434d", // I-26 MM40
-  "1682cc9c-c58c-4485-a04b-b603ad8069f0", // I-26 MM41 (also currently mapped to "US-25 Old Airport Rd" — see cameras.js note)
+  "1682cc9c-c58c-4485-a04b-b603ad8069f0", // I-26 MM41 (also currently mapped to "US-25 Old Airport Rd" — see public/cameras.js note)
   "35916952-ece1-4fc9-8f86-fbccebf8e3c5", // I-26 MM44 — US-25
   "00bec6b8-bfe4-4f92-81ec-caa12f09fe11", // I-26 MM45
   "081e9880-28ba-4059-a657-bf0094b8b29a", // US-25 — Airport Rd
@@ -41,7 +39,7 @@ function extractMedia(camera) {
     // page) and Views[].VideoUrl (often empty for municipal feeds). Field
     // names below are best-guesses for the still-image case and should be
     // confirmed against a real response for these NCDOT cameras, then
-    // trimmed to whatever's actually populated.
+    // trimmed to whatever's actually populated. See README TODOs.
     videoUrl: view.VideoUrl || camera.VideoUrl || null,
     imageUrl: view.ImageUrl || camera.ImageUrl || view.SnapshotUrl || null,
     viewerUrl: view.Url || null,
@@ -49,8 +47,18 @@ function extractMedia(camera) {
   };
 }
 
-export async function onRequestGet(context) {
-  const { env } = context;
+function jsonResponse(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "public, max-age=60",
+      ...extraHeaders,
+    },
+  });
+}
+
+async function handleCamerasApi(env) {
   const now = Date.now();
 
   if (cache.data && now - cache.fetchedAt < CACHE_TTL_MS) {
@@ -59,6 +67,8 @@ export async function onRequestGet(context) {
 
   const key = env.DRIVENC_API_KEY;
   if (!key) {
+    // No key configured yet: front end falls back to per-camera viewer-page
+    // iframes when this returns an empty array, so the wall stays usable.
     return jsonResponse([]);
   }
 
@@ -86,13 +96,14 @@ export async function onRequestGet(context) {
   }
 }
 
-function jsonResponse(data, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "cache-control": "public, max-age=60",
-      ...extraHeaders,
-    },
-  });
-}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/api/cameras" && request.method === "GET") {
+      return handleCamerasApi(env);
+    }
+
+    return env.ASSETS.fetch(request);
+  },
+};
