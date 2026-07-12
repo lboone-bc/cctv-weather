@@ -7,13 +7,13 @@
 // the full API dump. See README for details.)
 const CAMERAS = [
   { id: 4208, label: "I-26 MM37 — Long Shoals Rd", priority: true },
+  { id: 4839, label: "I-26 MM35" },
   { id: 6120, label: "I-26 MM36" },
   { id: 5269, label: "I-26 MM39" }, // nearest live camera to MM39 (exact MM39 unit has no video feed)
   { id: 4210, label: "I-26 MM40" },
   { id: 4868, label: "I-26 MM41" },
   { id: 4876, label: "I-26 MM44 — US-25" },
   { id: 6101, label: "I-26 MM45" },
-  { id: 6103, label: "US-25 — Old Airport Rd" },
   { id: 4221, label: "US-25 — Airport Rd" },
   { id: 4224, label: "US-25 — Long Shoals Rd" },
   { id: 4223, label: "US-25 — Gerber Village" },

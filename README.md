@@ -83,9 +83,9 @@ Henderson counties. Confirmed via a live `curl`:
   (`renderHlsStream()` uses native HLS on Safari, `hls.js` everywhere else).
 - The exact "MM39" camera unit (Id 4851) has no video feed populated: the
   nearest live camera (`CCTV13-I26-39.6E`, Id 5269) was used instead.
-- "US-25 Old Airport Rd" has its own real camera, `CCTV14-US25_OLDAIRPORT`
-  (Id 6103) — distinct from I-26 MM41, resolving the duplicate-GUID issue
-  from the original source list.
+- The public DriveNC URL `https://www.drivenc.gov/2da52ce8-5049-4024-8a6d-04b949ca9daa`
+  corresponds to `CCTV13-I26-35M` (Id 4839) in the Cameras API; the GUID
+  itself is still only a public-site route identifier.
 
 ## Architecture
 
@@ -164,13 +164,13 @@ Remaining cameras (all confirmed with live HLS streams as of this writing):
 
 | Label | DriveNC Id | Notes |
 |---|---|---|
+| I-26 MM35 | `4839` | resolved from public DriveNC GUID `2da52ce8-5049-4024-8a6d-04b949ca9daa` |
 | I-26 MM36 | `6120` | |
 | I-26 MM39 | `5269` | nearest live camera; exact MM39 unit has no video feed |
 | I-26 MM40 | `4210` | |
 | I-26 MM41 | `4868` | |
 | I-26 MM44 — US-25 | `4876` | |
 | I-26 MM45 | `6101` | |
-| US-25 — Old Airport Rd | `6103` | resolved from the original duplicate-GUID entry |
 | US-25 — Airport Rd | `4221` | |
 | US-25 — Long Shoals Rd | `4224` | |
 | US-25 — Gerber Village | `4223` | |

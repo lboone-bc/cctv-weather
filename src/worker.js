@@ -14,13 +14,13 @@
 // Confirmed field: Views[0].VideoUrl is a live HLS (.m3u8) stream.
 const WANTED_CAMERA_IDS = [
   4208, // I-26 MM37 — Long Shoals Rd (priority)
+  4839, // I-26 MM35
   6120, // I-26 MM36
   5269, // I-26 MM39 (nearest live camera to MM39; exact MM39 unit has no video feed)
   4210, // I-26 MM40
   4868, // I-26 MM41
   4876, // I-26 MM44 — US-25
   6101, // I-26 MM45
-  6103, // US-25 — Old Airport Rd
   4221, // US-25 — Airport Rd
   4224, // US-25 — Long Shoals Rd
   4223, // US-25 — Gerber Village
