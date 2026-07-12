@@ -43,14 +43,20 @@ async function updateCurrentConditions(pointMeta) {
     const windSpeedKmh = p.windSpeed?.value;
     const windMph = typeof windSpeedKmh === "number" ? Math.round(windSpeedKmh * 0.621371) : null;
     const humidity = p.relativeHumidity?.value != null ? Math.round(p.relativeHumidity.value) : null;
+    const iconUrl = p.icon || null;
 
     container.innerHTML = `
       <h2>Arden, NC</h2>
-      <div class="temp">${tempF != null ? `${tempF}°F` : "—"}</div>
-      <div class="desc">${desc}</div>
-      <div class="meta">
-        ${windMph != null ? `<span>Wind ${windMph} mph</span>` : ""}
-        ${humidity != null ? `<span>Humidity ${humidity}%</span>` : ""}
+      <div class="current-body">
+        ${iconUrl ? `<img class="condition-icon" src="${iconUrl}" alt="${desc}" />` : ""}
+        <div class="current-main">
+          <div class="temp">${tempF != null ? `${tempF}°F` : "—"}</div>
+          <div class="desc">${desc}</div>
+          <div class="meta">
+            ${windMph != null ? `<span>Wind ${windMph} mph</span>` : ""}
+            ${humidity != null ? `<span>Humidity ${humidity}%</span>` : ""}
+          </div>
+        </div>
       </div>
     `;
 
@@ -118,7 +124,7 @@ async function updateWeather() {
 // ---- Radar (Leaflet + RainViewer) ----
 
 let radarMap;
-let radarLayers = [];
+let radarFrames = []; // [{ time, layer }]
 let radarFrameIndex = 0;
 let radarAnimationTimer;
 
@@ -140,6 +146,17 @@ function initRadarMap() {
   }).addTo(radarMap);
 
   L.marker([ARDEN_LAT, ARDEN_LON]).addTo(radarMap);
+
+  // The radar panel's size depends on flex/grid layout (plus a staggered
+  // entrance animation and webfont swap-in) that may still be settling when
+  // this runs, so Leaflet's initial container-size read can be stale —
+  // which left the view visibly off-center once layout finished. Keep the
+  // map's size/center in sync with its actual rendered container.
+  const resizeObserver = new ResizeObserver(() => {
+    radarMap.invalidateSize();
+    radarMap.setView([ARDEN_LAT, ARDEN_LON], radarMap.getZoom());
+  });
+  resizeObserver.observe(document.getElementById("radar-map"));
 }
 
 async function refreshRadarFrames() {
@@ -148,9 +165,10 @@ async function refreshRadarFrames() {
     const past = data.radar?.past || [];
     const frames = past.slice(-6); // last ~6 frames (roughly the past hour)
 
-    radarLayers.forEach((layer) => radarMap.removeLayer(layer));
-    radarLayers = frames.map((frame) =>
-      L.tileLayer(`${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+    radarFrames.forEach((f) => radarMap.removeLayer(f.layer));
+    radarFrames = frames.map((frame) => ({
+      time: frame.time,
+      layer: L.tileLayer(`${data.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`, {
         opacity: 0,
         zIndex: 10,
         // RainViewer only renders real radar tiles up to zoom 7 — past that
@@ -158,8 +176,8 @@ async function refreshRadarFrames() {
         // maxNativeZoom makes Leaflet reuse (and upscale) the zoom-7 tiles
         // at closer map zooms instead of requesting unsupported ones.
         maxNativeZoom: 7,
-      }).addTo(radarMap)
-    );
+      }).addTo(radarMap),
+    }));
 
     radarFrameIndex = 0;
     startRadarAnimation();
@@ -170,12 +188,52 @@ async function refreshRadarFrames() {
 
 function startRadarAnimation() {
   clearInterval(radarAnimationTimer);
-  if (radarLayers.length === 0) return;
+  if (radarFrames.length === 0) return;
 
-  radarAnimationTimer = setInterval(() => {
-    radarLayers.forEach((layer, i) => layer.setOpacity(i === radarFrameIndex ? 0.75 : 0));
-    radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
-  }, RADAR_ANIMATION_FRAME_MS);
+  const timeEl = document.getElementById("radar-time");
+
+  const renderFrame = () => {
+    radarFrames.forEach((f, i) => f.layer.setOpacity(i === radarFrameIndex ? 0.75 : 0));
+    if (timeEl) {
+      const label = new Date(radarFrames[radarFrameIndex].time * 1000).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      timeEl.textContent = label;
+    }
+    radarFrameIndex = (radarFrameIndex + 1) % radarFrames.length;
+  };
+
+  renderFrame();
+  radarAnimationTimer = setInterval(renderFrame, RADAR_ANIMATION_FRAME_MS);
+}
+
+// ---- Fullscreen toggle (for driving this off a TV without browser chrome) ----
+
+function initFullscreenToggle() {
+  const btn = document.getElementById("fullscreen-toggle");
+  if (!btn) return;
+
+  const updateLabel = () => {
+    const isFullscreen = !!document.fullscreenElement;
+    btn.textContent = isFullscreen ? "⤡" : "⛶";
+    const label = isFullscreen ? "Exit fullscreen" : "Enter fullscreen";
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+  };
+
+  btn.addEventListener("click", () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen().catch((err) => {
+        console.warn("Fullscreen request failed:", err);
+      });
+    }
+  });
+
+  document.addEventListener("fullscreenchange", updateLabel);
+  updateLabel();
 }
 
 function init() {
@@ -188,6 +246,8 @@ function init() {
   initRadarMap();
   refreshRadarFrames();
   setInterval(refreshRadarFrames, RADAR_FRAMES_REFRESH_MS);
+
+  initFullscreenToggle();
 }
 
 document.addEventListener("DOMContentLoaded", init);
