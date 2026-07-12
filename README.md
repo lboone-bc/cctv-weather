@@ -21,13 +21,49 @@ mapping was resolved. Remaining items:
       stick/smart-TV browser may struggle — if so, consider showing fewer
       live streams at once and cycling the rest, or capping video
       resolution).
-- [ ] Set `DRIVENC_API_KEY` as a secret in the Cloudflare dashboard (see
-      Setup below) so the deployed site — not just local dev — gets live
-      cameras instead of the iframe fallback.
+- [x] `DRIVENC_API_KEY` is set as a secret on the deployed Worker — see the
+      **"Secrets keep disappearing"** note below, this needs periodic
+      re-checking, not just a one-time setup step.
 
 Until the key is set in the deployed environment, every tile falls back to
-an `<iframe>` of its public `drivenc.gov` viewer page, so the wall is
-functional out of the box.
+a scaled-down `<iframe>` of its public `drivenc.gov` viewer page, so the
+wall is functional even without it. Individual cameras also fall back
+per-tile, automatically, whenever their HLS stream fails to start playing
+within ~18s (NCDOT's streaming servers have brief, self-resolving blips even
+on healthy cameras — confirmed by direct testing, not a bug here) — a
+90-second refresh cycle retries and upgrades them back to live video once
+the stream recovers.
+
+### Secrets keep disappearing — known Cloudflare bug
+
+`DRIVENC_API_KEY` has been wiped from the Worker's dashboard settings
+multiple times during development, each time reverting every camera to the
+iframe fallback (`/api/cameras` starts returning `[]` with **HTTP 200** —
+that specific response, empty array + status 200 rather than 502, only
+comes from the `if (!key)` branch in `src/worker.js`, so it's a reliable
+signal the secret is missing).
+
+This matches a known, still-open Cloudflare issue: their built-in Git
+integration (the auto-deploy-on-push pipeline this project uses) can wipe
+dashboard-set secrets on deploy, even though a normal `wrangler deploy` is
+documented to leave secrets untouched. See
+[cloudflare/workers-sdk#8871](https://github.com/cloudflare/workers-sdk/issues/8871).
+There's no confirmed permanent fix as of this writing.
+
+**If cameras suddenly all show the iframe fallback again:**
+
+1. Check `https://cctv-weather.lboone.workers.dev/api/cameras` — `[]` with
+   HTTP 200 confirms the secret is gone (give it ~10s after any dashboard
+   change to propagate before concluding it's actually missing).
+2. Re-add it: Cloudflare dashboard → the `cctv-weather` Worker → **Settings
+   → Variables and Secrets → Add** → Type **Secret**, Name
+   `DRIVENC_API_KEY`, paste the value → **Deploy**.
+3. If this keeps recurring often enough to be painful, the more durable fix
+   is to stop using Cloudflare's dashboard Git integration for deploys and
+   instead deploy via a self-managed GitHub Actions workflow
+   (`cloudflare/wrangler-action` running a real `wrangler deploy`, with a
+   `CLOUDFLARE_API_TOKEN` GitHub Actions secret) — that path is documented
+   to actually preserve secrets. Not set up yet; ask if this should be done.
 
 ### How the camera IDs were resolved
 
