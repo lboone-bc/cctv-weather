@@ -17,9 +17,7 @@ const CAMERAS = [
   { id: 4221, label: "US-25 — Airport Rd" },
   { id: 4224, label: "US-25 — Long Shoals Rd" },
   { id: 4223, label: "US-25 — Gerber Village" },
-  { id: 4227, label: "US-25 — Rock Hill Rd" },
   { id: 4203, label: "Airport Rd — Fanning Bridge Rd" },
-  { id: 6100, label: "Airport Rd — Ferncliff" },
 ];
 
 const CAMERA_API_URL = "/api/cameras";
@@ -91,7 +89,7 @@ function renderFallbackIframe(tile) {
   };
   scaleToFit();
 
-  // Tile size can change (grid reflow on load, priority tile is 2x2, etc.);
+  // Tile size can change (grid reflow on load, priority tile is 3x3, etc.);
   // keep the scale in sync rather than computing it once and going stale.
   if (tile._fallbackResizeObserver) tile._fallbackResizeObserver.disconnect();
   const ro = new ResizeObserver(scaleToFit);

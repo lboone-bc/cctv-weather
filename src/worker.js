@@ -24,9 +24,7 @@ const WANTED_CAMERA_IDS = [
   4221, // US-25 — Airport Rd
   4224, // US-25 — Long Shoals Rd
   4223, // US-25 — Gerber Village
-  4227, // US-25 — Rock Hill Rd
   4203, // Airport Rd — Fanning Bridge Rd
-  6100, // Airport Rd — Ferncliff
 ];
 
 const CACHE_TTL_MS = 90_000;

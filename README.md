@@ -8,7 +8,7 @@ static assets).
 
 ## Status / open TODOs
 
-The DriveNC Cameras API has been called live with a real key and all 14
+The DriveNC Cameras API has been called live with a real key and all 12
 cameras confirmed working — see [Cameras](#cameras) below for how the
 mapping was resolved. Remaining items:
 
@@ -16,7 +16,7 @@ mapping was resolved. Remaining items:
       (no blocking `X-Frame-Options`/CSP) — verified visually via the local
       fallback rendering. This is the path used whenever `/api/cameras`
       hasn't responded yet or a stream fails to play.
-- [ ] Watch the wall run for a while and confirm 14 simultaneous HLS streams
+- [ ] Watch the wall run for a while and confirm 12 simultaneous HLS streams
       don't overload whatever device is driving the TV (a low-power
       stick/smart-TV browser may struggle — if so, consider showing fewer
       live streams at once and cycling the rest, or capping video
@@ -70,7 +70,7 @@ There's no confirmed permanent fix as of this writing.
 The GUIDs from the original drivenc.gov URLs (e.g. `07a325cd-ac00-...`)
 **do not appear anywhere** in the DriveNC Cameras API response — that GUID
 scheme belongs only to the public site's client-side router. The API
-identifies cameras by a numeric `Id` instead. The 14 cameras above were
+identifies cameras by a numeric `Id` instead. The 12 cameras above were
 matched by pulling the full API dataset (1,153 cameras) and cross-referencing
 each requested camera's road/mile-marker/cross-street against the API's
 `Location`, `Roadway`, `Direction`, and lat/lon fields for Buncombe and
@@ -144,11 +144,17 @@ readouts. Palette roles are intentionally not evenly distributed: amber
 marks the header accent/priority feed/alerts, cyan marks
 weather/radar/default HUD elements, green and red are reserved strictly for
 live/error status dots. Camera tiles fade in with a staggered "boot
-sequence" on load. See `public/style.css` for the full system.
+sequence" on load. The camera grid is 4 columns of true-16:9 tiles matching
+the source video's aspect ratio (so `object-fit: cover` has no edges to crop),
+with the priority I-26 / Long Shoals feed rendered as a large 3×3 hero
+anchored top-left and the remaining 11 feeds packed around it with no empty
+cells. The secondary/tertiary text colors are kept deliberately light so the
+eyebrow, panel headers, and forecast text stay legible from across a room on
+the TV. See `public/style.css` for the full system.
 
 ## Cameras
 
-Priority camera (rendered larger, top of the grid):
+Priority camera (rendered as a large 3×3 hero, top-left of the grid):
 
 | Label | DriveNC Id | Live stream |
 |---|---|---|
@@ -168,9 +174,7 @@ Remaining cameras (all confirmed with live HLS streams as of this writing):
 | US-25 — Airport Rd | `4221` | |
 | US-25 — Long Shoals Rd | `4224` | |
 | US-25 — Gerber Village | `4223` | |
-| US-25 — Rock Hill Rd | `4227` | |
 | Airport Rd — Fanning Bridge Rd | `4203` | |
-| Airport Rd — Ferncliff | `6100` | Roadway is tagged NC-280 in DriveNC's data |
 
 Viewer page (iframe fallback) for any camera: `https://www.drivenc.gov/map/Cctv/{id}`.
 
@@ -193,7 +197,7 @@ there's no reliable way to derive it from a drivenc.gov viewer URL.
 ### 2. Local development
 
 ```bash
-npm install
+npm ci                           # or npm install if updating dependencies
 cp .dev.vars.example .dev.vars   # then fill in DRIVENC_API_KEY
 npm run dev                      # wrangler dev, serves the Worker + static assets locally
 ```

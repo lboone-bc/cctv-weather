@@ -17,8 +17,8 @@
   --border-bright: #2c3947;
 
   --text-primary: #e9eef3;
-  --text-secondary: #7e93a8;
-  --text-tertiary: #45566a;
+  --text-secondary: #aebccb;
+  --text-tertiary: #8295a9;
 
   --accent-amber: #ffb020;
   --accent-amber-dim: #8a6420;
@@ -206,7 +206,7 @@ body {
 
 .cameras {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   grid-auto-rows: 1fr;
   grid-auto-flow: dense;
   gap: 0.45rem;
@@ -234,8 +234,8 @@ body {
 }
 
 .camera-tile.priority {
-  grid-column: span 2;
-  grid-row: span 2;
+  grid-column: span 3;
+  grid-row: span 3;
 }
 
 .camera-tile img,
