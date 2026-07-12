@@ -53,16 +53,50 @@ function buildTile(cam, index) {
   return tile;
 }
 
+// The drivenc.gov viewer page renders at its own natural desktop size —
+// embedded at 100%/100% it just shows an unscaled, cropped fragment (the
+// page's own oversized header text filling the whole tile). Instead, size
+// the iframe to that natural viewport and scale the whole thing down to
+// cover the tile, so it reads as "a small view of their page" rather than
+// "zoomed into one corner of it".
+const IFRAME_NATURAL_WIDTH = 1600;
+const IFRAME_NATURAL_HEIGHT = 1000;
+
 function renderFallbackIframe(tile) {
   const id = tile.dataset.id;
   tile.classList.remove("live", "error");
   const media = tile.querySelector(".media");
   media.innerHTML = "";
+
   const iframe = document.createElement("iframe");
   iframe.src = viewerUrl(id);
   iframe.loading = "lazy";
   iframe.title = tile.querySelector(".label").textContent;
+  Object.assign(iframe.style, {
+    position: "absolute",
+    top: "0",
+    left: "0",
+    width: `${IFRAME_NATURAL_WIDTH}px`,
+    height: `${IFRAME_NATURAL_HEIGHT}px`,
+    transformOrigin: "top left",
+    border: "0",
+  });
   media.appendChild(iframe);
+
+  const scaleToFit = () => {
+    const rect = tile.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const scale = Math.max(rect.width / IFRAME_NATURAL_WIDTH, rect.height / IFRAME_NATURAL_HEIGHT);
+    iframe.style.transform = `scale(${scale})`;
+  };
+  scaleToFit();
+
+  // Tile size can change (grid reflow on load, priority tile is 2x2, etc.);
+  // keep the scale in sync rather than computing it once and going stale.
+  if (tile._fallbackResizeObserver) tile._fallbackResizeObserver.disconnect();
+  const ro = new ResizeObserver(scaleToFit);
+  ro.observe(tile);
+  tile._fallbackResizeObserver = ro;
 }
 
 function renderImage(tile, imageUrl) {
@@ -80,7 +114,10 @@ function renderImage(tile, imageUrl) {
   img.src = `${imageUrl}${sep}_ts=${Date.now()}`;
 }
 
-const HLS_CONNECT_TIMEOUT_MS = 12_000;
+// NCDOT's streaming servers have brief (few-second) manifest/segment blips
+// fairly often even on healthy cameras; give hls.js's own internal retry
+// backoff room to ride those out before we give up on this attempt.
+const HLS_CONNECT_TIMEOUT_MS = 18_000;
 
 // NCDOT camera feeds are HLS (.m3u8) live streams. Safari/iOS play HLS
 // natively via <video src>; everywhere else needs hls.js (loaded in index.html).
