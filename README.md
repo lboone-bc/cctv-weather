@@ -32,7 +32,8 @@ per-tile, automatically, whenever their HLS stream fails to start playing
 within ~18s (NCDOT's streaming servers have brief, self-resolving blips even
 on healthy cameras — confirmed by direct testing, not a bug here) — a
 90-second refresh cycle retries and upgrades them back to live video once
-the stream recovers.
+the stream recovers. Click any camera tile to make it the large feature feed;
+the existing media player stays attached while the grid rearranges.
 
 ### Secrets keep disappearing — known Cloudflare bug
 
@@ -150,15 +151,17 @@ weather/radar/default HUD elements, green and red are reserved strictly for
 live/error status dots. Camera tiles fade in with a staggered "boot
 sequence" on load. The camera grid is 4 columns of true-16:9 tiles matching
 the source video's aspect ratio (so `object-fit: cover` has no edges to crop),
-with the priority I-26 / Long Shoals feed rendered as a large 3×3 hero
-anchored top-left and the remaining 11 feeds packed around it with no empty
-cells. The secondary/tertiary text colors are kept deliberately light so the
-eyebrow, panel headers, and forecast text stay legible from across a room on
-the TV. See `public/style.css` for the full system.
+with the priority I-26 / Long Shoals feed rendered as the initial large 3×3
+hero anchored top-left. Clicking any camera transfers the single hero state
+to that tile without rebuilding its media player or changing canonical DOM
+order; the remaining 11 feeds repack around it with no empty cells. The
+secondary/tertiary text colors are kept deliberately light so the eyebrow,
+panel headers, and forecast text stay legible from across a room on the TV.
+See `public/style.css` for the full system.
 
 ## Cameras
 
-Priority camera (rendered as a large 3×3 hero, top-left of the grid):
+Initial priority camera (rendered as a large 3×3 hero, top-left of the grid):
 
 | Label | DriveNC Id | Live stream |
 |---|---|---|
@@ -185,9 +188,11 @@ Viewer page (iframe fallback) for any camera: `https://www.drivenc.gov/map/Cctv/
 To add/remove/reorder cameras: edit `CAMERAS` in `public/cameras.js` and
 `WANTED_CAMERA_IDS` in `src/worker.js` (both need the numeric DriveNC `Id`;
 keep them in sync). Set `priority: true` on at most one camera in
-`public/cameras.js` for the large tile. To find a new camera's Id, query the
-DriveNC API with a valid key and search by `Location`/`Roadway`/lat-lon —
-there's no reliable way to derive it from a drivenc.gov viewer URL.
+`public/cameras.js` for the initial large tile; the user can select any other
+feature camera at runtime by clicking its tile. To find a new camera's Id,
+query the DriveNC API with a valid key and search by
+`Location`/`Roadway`/lat-lon — there's no reliable way to derive it from a
+drivenc.gov viewer URL.
 
 ## Setup
 

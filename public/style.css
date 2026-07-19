@@ -234,8 +234,22 @@ body {
 }
 
 .camera-tile.priority {
-  grid-column: span 3;
-  grid-row: span 3;
+  grid-area: 1 / 1 / span 3 / span 3;
+}
+
+.camera-tile .feature-toggle {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.camera-tile .feature-toggle:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: -3px;
 }
 
 .camera-tile img,
@@ -261,7 +275,8 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  z-index: 2;
+  z-index: 4;
+  pointer-events: none;
 }
 
 .camera-tile.priority .label {
@@ -276,7 +291,8 @@ body {
   height: 0.5rem;
   border-radius: 50%;
   background: var(--text-tertiary);
-  z-index: 4;
+  z-index: 5;
+  pointer-events: none;
 }
 
 .camera-tile.live .status-dot {
@@ -533,6 +549,7 @@ body {
   }
 
   .camera-tile.priority {
+    grid-area: auto;
     grid-column: span 2;
     grid-row: span 1;
   }

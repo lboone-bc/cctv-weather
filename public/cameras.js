@@ -48,7 +48,37 @@ function buildTile(cam, index) {
   media.style.height = "100%";
   tile.appendChild(media);
 
+  const featureToggle = document.createElement("button");
+  featureToggle.className = "feature-toggle";
+  featureToggle.type = "button";
+  featureToggle.title = cam.priority
+    ? `${cam.label} is the feature camera`
+    : `Show ${cam.label} as the feature camera`;
+  featureToggle.setAttribute("aria-label", featureToggle.title);
+  featureToggle.setAttribute("aria-pressed", String(Boolean(cam.priority)));
+  featureToggle.addEventListener("click", () => setFeatureCamera(tile));
+  tile.appendChild(featureToggle);
+
   return tile;
+}
+
+function setFeatureCamera(nextFeature) {
+  const currentFeature = document.querySelector(".camera-tile.priority");
+  if (currentFeature === nextFeature) return;
+
+  currentFeature?.classList.remove("priority");
+  nextFeature.classList.add("priority");
+
+  document.querySelectorAll(".camera-tile").forEach((tile) => {
+    const button = tile.querySelector(".feature-toggle");
+    const isFeature = tile === nextFeature;
+    const label = tile.querySelector(".label").textContent;
+    button.setAttribute("aria-pressed", String(isFeature));
+    button.title = isFeature
+      ? `${label} is the feature camera`
+      : `Show ${label} as the feature camera`;
+    button.setAttribute("aria-label", button.title);
+  });
 }
 
 // The drivenc.gov viewer page renders at its own natural desktop size —
