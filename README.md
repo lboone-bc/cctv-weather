@@ -11,19 +11,21 @@ static assets).
 The DriveNC Cameras API has been called live with a real key and all 12
 camera mappings have been confirmed — see [Cameras](#cameras) below for how
 the mapping was resolved. HLS availability is intentionally treated as
-dynamic. On July 26, 2026, NCDOT's HLS origins began returning `401
-Unauthorized` with an `XEngine` HTTP Basic-auth challenge; that is an
-upstream streaming-service outage, not a request for a DriveNC website
-login. The Worker now probes every manifest server-side and gives the
-browser a direct HLS URL only after receiving a valid 2xx HLS playlist.
-Unavailable feeds remain on the public DriveNC image fallback, so the wall
-does not open a browser credential dialog. Remaining items:
+dynamic. On July 26, 2026, the unsigned URLs in the Cameras API were found to
+return `401 Unauthorized` with an `XEngine` HTTP Basic-auth challenge. The
+current DriveNC player does not authenticate that challenge with a website
+account. Instead, it gets a per-camera token request from DriveNC, exchanges
+that object with Insight ATMS for a signed suffix, and appends the
+suffix to the unsigned HLS URL. The Worker now performs that same server-side
+flow, probes the signed manifest, and gives the browser only a verified signed
+URL. Unavailable feeds remain on the public DriveNC image fallback, so the
+wall does not open a browser credential dialog. Remaining items:
 
 - [x] Confirmed `drivenc.gov/map/Cctv/{id}` returns a public camera image —
       verified visually via the local fallback rendering. This is the path
       used whenever `/api/cameras`
-      hasn't responded yet, the Worker's manifest probe does not receive a
-      valid 2xx HLS playlist, or a verified stream subsequently fails.
+      hasn't responded yet, signing or manifest validation fails, or a
+      verified stream subsequently fails.
 - [ ] Watch the wall run for a while and confirm 12 simultaneous HLS streams
       don't overload whatever device is driving the TV (a low-power
       stick/smart-TV browser may struggle — if so, consider showing fewer
@@ -35,31 +37,88 @@ does not open a browser credential dialog. Remaining items:
 
 Until the key is set in the deployed environment, every tile falls back to
 a public DriveNC camera image, so the wall is functional even without it.
-Individual cameras also fall back
-per-tile whenever the server-side manifest probe fails or their verified HLS
-stream does not start playing within ~18s. A 90-second browser refresh cycle
-retries the Worker, whose HLS-health decision is cached for at most 10
-seconds, and upgrades the tile back to HLS automatically once the manifest
-is healthy again. Click any camera tile to make it the large feature feed;
-the existing media player stays attached while the grid rearranges.
+Individual cameras also fall back per-tile whenever signing or the server-side
+manifest probe fails, or their verified HLS stream does not start playing
+within ~18s. After `playing`, each tile checks `video.currentTime` every five
+seconds and treats 25 seconds without media-time progress as a stall. Fatal
+video/HLS errors remain active for the full playback attempt. Hidden tabs
+reset their progress baseline instead of reporting a false stall when the
+browser suspends them.
+
+Healthy signed media is renewed after at most five minutes. Although the
+DriveNC bundle contains an optional 60-second renewal loop, that loop is
+currently disabled in the live player; a sanitized July 26 test confirmed one
+signed token still served its master playlist, media playlist, and segment
+after more than 11 minutes. Five minutes is therefore a conservative
+application policy, not an observed upstream expiry. A successfully reprobed
+older URL can bridge a transient renewal failure, but the Worker never returns
+one more than 15 minutes after it was signed. The browser keeps its normal
+90-second metadata cadence, shortening only the check that lands immediately
+before the five-minute renewal deadline. Camera-inventory requests are bounded
+to 15 seconds, and a browser camera-API poll is abandoned after 150 seconds so a
+stalled request cannot permanently stop an unattended wall's recovery loop.
+An unavailable feed retries after 10 seconds. A playback failure also falls
+back immediately and then calls
+`/api/cameras?refresh=1&cameraId={configuredId}` after 10 seconds, forcing
+only that camera's cached health/signing result to refresh. Concurrent
+requests for the same camera coalesce, and the Worker rate-limits forced
+bypasses to one per camera per 10 seconds. Click any camera tile to make it
+the large feature feed; the existing media player stays attached while the
+grid rearranges.
 
 ### If an NCDOT/XEngine login prompt appears
 
-Do not enter a DriveNC username or password. The prompt comes from NCDOT's
-separate HLS streaming origin on port 8887, while this application uses only
-the developer API key stored as `DRIVENC_API_KEY` to fetch camera metadata.
-A normal DriveNC account credential is neither required nor accepted for HLS
-playback and must not be added to Cloudflare.
+Do not enter a DriveNC username or password. The prompt comes from an unsigned
+request to NCDOT's separate HLS streaming origin on port 8887. A normal
+DriveNC account credential is neither required nor accepted there and must
+not be added to Cloudflare. The signing endpoints used by DriveNC's own player
+do not require the user's username/password or browser session cookies. This
+application uses only the developer API key stored as `DRIVENC_API_KEY` to
+fetch camera metadata.
 
-The current code prevents a known 401 manifest from reaching the browser:
+The current code prevents an unsigned 401 URL from reaching the browser. The
+Worker validates the configured numeric camera ID and unsigned NCDOT
+origin/path, obtains and validates a signed suffix, and requires the signed
+manifest to return a 2xx `#EXTM3U` playlist. On any failure,
 `/api/cameras` returns that camera with `hlsAvailable: false`,
 `videoUrl: null`, and its safe `fallbackUrl`. Responses are `Cache-Control:
-no-store`; the Worker owns the 90-second camera-metadata cache and 10-second
-HLS-health cache. If an already-open tab predates this fix, close it before
-opening the updated wall so its old HLS player cannot continue retrying the
-challenged origin.
+no-store`; healthy signed-media results renew by five minutes and unavailable
+ones retry after 10 seconds. Signing is cached independently per camera and
+limited to three concurrent flows and four due cameras per API invocation. A
+transient HTTP 429 from either signing endpoint gets two short,
+bounded-backoff retries. If renewal fails, an older signed URL is retained
+only when an immediate manifest reprobe proves that it still works and the URL
+is less than 15 minutes old; otherwise that tile returns to its public image.
+Fallback responses for enabled cameras carry an explicit retry marker so the
+wall shows a red error-status dot rather than falsely reporting unavailable
+HLS as green/live. Targeted
+`refresh=1&cameraId=...` recovery accepts only one of the 12 configured
+numeric IDs and bypasses only that camera's cache after the 10-second guard,
+so one stalled feed cannot make its 11 healthy peers re-sign. If an
+already-open tab predates this fix, close it before opening the updated wall
+so its old HLS player cannot continue retrying an unsigned origin.
 
-### Secrets keep disappearing — known Cloudflare bug
+Cloudflare Workers Free allows 50 external subrequests per invocation. A cold
+12-camera request needs 37 subrequests when every signing exchange succeeds,
+but two configured 429 retries at both grant endpoints could exceed that
+limit. `/api/cameras` therefore signs at most four due cameras per invocation,
+always spending the first slot on a valid forced camera. Remaining due
+cameras keep previously validated cached media when available, or receive the
+safe public image, plus an approximately 10-second refresh hint. A rotating
+roster cursor advances the next four-camera batch even when an earlier camera
+keeps failing, so a cold wall progressively upgrades all 12 feeds over
+several requests instead of exhausting the Worker subrequest budget. Even
+the configured worst case—fresh inventory, both grant endpoints retrying
+twice, a signed-manifest probe, and an older-manifest reprobe for each of four
+cameras—stays at or below 33 external subrequests.
+Overlapping `/api/cameras` polls are serialized per Worker isolate. A
+collision receives a retryable HTTP 503 `refresh-in-progress` response, and
+the browser preserves its current tiles until the next recovery check. The
+DriveNC inventory fetch has its own 15-second abort deadline, while the browser
+uses a wider 150-second deadline that still accommodates a worst-case bounded
+four-camera signing batch.
+
+### Secret retention
 
 `DRIVENC_API_KEY` has been wiped from the Worker's dashboard settings
 multiple times during development, each time reverting every camera to the
@@ -68,12 +127,13 @@ that specific response, empty array + status 200 rather than 502, only
 comes from the `if (!key)` branch in `src/worker.js`, so it's a reliable
 signal the secret is missing).
 
-This matches a known, still-open Cloudflare issue: their built-in Git
-integration (the auto-deploy-on-push pipeline this project uses) can wipe
-dashboard-set secrets on deploy, even though a normal `wrangler deploy` is
-documented to leave secrets untouched. See
-[cloudflare/workers-sdk#8871](https://github.com/cloudflare/workers-sdk/issues/8871).
-There's no confirmed permanent fix as of this writing.
+`wrangler.jsonc` now sets `keep_vars: true`, which tells Wrangler to preserve
+dashboard-managed variables during deployment. Cloudflare also documents that
+encrypted secrets should survive normal Wrangler deployments. A prior
+Git-integration/version-upload defect was tracked in
+[cloudflare/workers-sdk#8871](https://github.com/cloudflare/workers-sdk/issues/8871);
+because the key is operationally critical, verify `/api/cameras` after every
+release rather than assuming retention.
 
 **If cameras suddenly all show the snapshot fallback again:**
 
@@ -83,12 +143,9 @@ There's no confirmed permanent fix as of this writing.
 2. Re-add it: Cloudflare dashboard → the `cctv-weather` Worker → **Settings
    → Variables and Secrets → Add** → Type **Secret**, Name
    `DRIVENC_API_KEY`, paste the value → **Deploy**.
-3. If this keeps recurring often enough to be painful, the more durable fix
-   is to stop using Cloudflare's dashboard Git integration for deploys and
-   instead deploy via a self-managed GitHub Actions workflow
-   (`cloudflare/wrangler-action` running a real `wrangler deploy`, with a
-   `CLOUDFLARE_API_TOKEN` GitHub Actions secret) — that path is documented
-   to actually preserve secrets. Not set up yet; ask if this should be done.
+3. Confirm `keep_vars: true` is still present in `wrangler.jsonc` before any
+   deployment. If retention fails again, stop and diagnose the deployment
+   path before re-running it.
 
 ### How the camera IDs were resolved
 
@@ -101,13 +158,14 @@ each requested camera's road/mile-marker/cross-street against the API's
 `Location`, `Roadway`, `Direction`, and lat/lon fields for Buncombe and
 Henderson counties. Confirmed via a live `curl`:
 
-- Each camera's `Views[0].VideoUrl` supplied a publicly reachable **HLS
-  (.m3u8) live stream** when the roster was originally verified — e.g.
+- Each camera's `Views[0].VideoUrl` supplies the unsigned **HLS (.m3u8) live
+  stream** base — e.g.
   `https://cfase01.services.ncdot.gov:8887/chan-5378_l/index.m3u8` for I-26
-  MM37. Availability can change independently of the DriveNC camera status,
-  so `src/worker.js` now validates each playlist before
-  `public/cameras.js` is allowed to call `renderHlsStream()` (which uses
-  native HLS on Safari and `hls.js` everywhere else).
+  MM37. Before playback, `src/worker.js` gets the token object from
+  `www.drivenc.gov/Camera/GetVideoUrl?imageId={id}`, posts that exact JSON to
+  Insight ATMS, appends the returned signed suffix, and validates the signed
+  playlist. Only then may `public/cameras.js` call `renderHlsStream()` (which
+  uses native HLS on Safari and `hls.js` everywhere else).
 - The exact "MM39" camera unit (Id 4851) has no video feed populated: the
   nearest live camera (`CCTV13-I26-39.6E`, Id 5269) was used instead.
 - The public DriveNC URL `https://www.drivenc.gov/2da52ce8-5049-4024-8a6d-04b949ca9daa`
@@ -129,14 +187,21 @@ Browser (TV) ──> public/index.html / style.css / cameras.js / weather.js
                      ├── GET .../get/cameras?key=... (server-side only)
                      │        DriveNC Cameras API
                      │
-                     └── GET each HLS manifest (server-side health probe)
+                     ├── GET /Camera/GetVideoUrl?imageId=...
+                     │        DriveNC per-camera token request
+                     │
+                     ├── POST token request JSON
+                     │        Insight ATMS signed-URI service
+                     │
+                     └── GET each signed HLS manifest (health probe)
                               NCDOT streaming origins
 ```
 
 - **Deployment model:** this repo deploys as a single Cloudflare **Worker
   with static assets** (`wrangler.jsonc`: `main: src/worker.js`,
-  `assets.directory: ./public`, `name: cctv-weather`), not the older Pages-Functions
-  (`/functions` directory) convention. Cloudflare's Git-integration build
+  `assets.directory: ./public`, `name: cctv-weather`, `keep_vars: true`), not
+  the older Pages-Functions (`/functions` directory) convention. Cloudflare's
+  Git-integration build
   pipeline for this project runs `npx wrangler deploy`, which needs exactly
   this shape — a single entry-point script plus an assets directory — so
   don't reintroduce a `/functions` folder expecting file-based routing; add
@@ -144,11 +209,21 @@ Browser (TV) ──> public/index.html / style.css / cameras.js / weather.js
 - **Cameras** come from DriveNC's official Cameras REST API, called from
   `src/worker.js` so the API key never reaches the browser and so repeated
   page refreshes across however many TVs are running this don't exceed
-  DriveNC's **10 requests / 60 seconds** rate limit — the Worker caches the
-  upstream camera metadata for 90 seconds. It separately fetches each HLS
-  manifest and exposes a direct stream URL only when the response is 2xx and
-  begins with a valid `#EXTM3U` playlist marker. Health decisions are cached
-  for 10 seconds; `/api/cameras` itself is always `Cache-Control: no-store`.
+  DriveNC's **10 requests / 60 seconds** developer-API rate limit — the
+  Worker caches the upstream camera metadata for 90 seconds. For each enabled
+  camera it performs DriveNC's current token exchange, accepts only a signed
+  URL on the expected NCDOT HTTPS origin/port/path, and exposes it only when
+  the manifest is 2xx and begins with `#EXTM3U`. Per-camera healthy signed
+  results renew by five minutes and have a hard 15-minute maximum age, with no
+  more than three signing flows in flight and no more than four due cameras
+  refreshed in one request. The inventory fetch aborts after 15 seconds rather
+  than holding the isolate's serialized camera route indefinitely.
+  Deferred cameras carry a 10-second retry hint and are selected in rotating
+  batches; unavailable feeds also retry after 10 seconds. The browser normally
+  asks for metadata every 90 seconds. A tile that fails or stops advancing for
+  25 seconds requests a targeted, rate-limited cache bypass after 10 seconds;
+  healthy peers keep their cached signed URLs. `/api/cameras` itself is always
+  `Cache-Control: no-store`.
 - **Weather** (current conditions + forecast) comes straight from the client
   to `api.weather.gov` (NWS) — free, no API key. Flow: `/points/{lat},{lon}`
   → forecast URL + nearest observation station → `/observations/latest`.
@@ -199,7 +274,8 @@ Initial priority camera (rendered as a large 3×3 hero, top-left of the grid):
 | **I-26 MM37 — Long Shoals Rd** | `4208` | HLS dynamically health-checked |
 
 Remaining selected cameras (all had live HLS streams when originally
-verified; current playback depends on the Worker's live manifest probe):
+verified; current playback depends on the Worker's signing flow and live
+manifest probe):
 
 | Label | DriveNC Id | Notes |
 |---|---|---|
@@ -234,9 +310,9 @@ drivenc.gov viewer URL.
    <https://www.drivenc.gov/developers/doc>.
 2. Don't put the key in any file in this repo. It's supplied as an
    environment variable (see below).
-3. Store only that developer API key in Cloudflare. A DriveNC account
-   username/password does not authenticate the separate HLS service and must
-   not be stored in Worker variables.
+3. Store only that developer API key in Cloudflare. The signed-HLS exchange
+   requires neither a DriveNC account username/password nor browser session
+   cookies; do not store either in Worker variables.
 
 ### 2. Local development
 
@@ -248,6 +324,18 @@ npm run dev                      # wrangler dev, serves the Worker + static asse
 
 (`.dev.vars` is git-ignored — see `.dev.vars.example` for the expected
 variable name.)
+
+Before releasing a camera or playback change, run:
+
+```bash
+npm run check
+npm run deploy -- --dry-run
+git diff --check
+```
+
+The check exercises the canonical roster and feature-camera layout, progressive
+four-camera signing budget, signed/fallback response contract, request
+deadlines, and the 15-minute maximum age for a retained token.
 
 ### 3. Deploy — Cloudflare
 
@@ -285,6 +373,7 @@ refreshes its own data on intervals, so it's meant to just be left open.
 | Source | Used for | Key required | Notes |
 |---|---|---|---|
 | [DriveNC Cameras API](https://www.drivenc.gov/developers/doc) | Camera media URLs | Yes (free) | 10 req/60s — proxied + cached server-side in `src/worker.js` |
+| DriveNC + Insight ATMS signed-HLS endpoints | Signed camera playback URLs | No account credentials | Server-side token exchange; healthy URLs conservatively renewed by 5 minutes |
 | [api.weather.gov](https://www.weather.gov/documentation/services-web-api) (NWS) | Current conditions, 3-day forecast | No | Called directly from the browser |
 | [RainViewer Weather Maps API](https://www.rainviewer.com/api.html) | Radar tiles | No | Free for personal/small-scale use; attribution required and present in `index.html` |
 | [Leaflet](https://leafletjs.com/) | Radar map rendering | No | Loaded via CDN |

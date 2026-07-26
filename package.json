@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Single-page CCTV + weather wall for a TV monitor: NC DOT I-26/US-25 traffic cameras near Arden, NC plus live weather and radar. Static HTML/CSS/JS + one Worker, deployed free on Cloudflare Workers (static assets).",
   "scripts": {
+    "check": "node scripts/verify-config.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },

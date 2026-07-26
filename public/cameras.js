@@ -21,7 +21,16 @@ const CAMERAS = [
 ];
 
 const CAMERA_API_URL = "/api/cameras";
-const CAMERA_META_REFRESH_MS = 90_000; // how often we re-ask the proxy for fresh media URLs
+const CAMERA_META_REFRESH_MS = 90_000;
+const CAMERA_UNAVAILABLE_RETRY_MS = 10_000;
+const CAMERA_API_TIMEOUT_MS = 150_000;
+const HLS_CONNECT_TIMEOUT_MS = 18_000;
+const HLS_STALL_CHECK_MS = 5_000;
+const HLS_STALL_TIMEOUT_MS = 25_000;
+let cameraRefreshTimer = null;
+let cameraRefreshDueAt = 0;
+let cameraRefreshInFlight = false;
+const pendingForcedCameraIds = new Set();
 
 function viewerUrl(id) {
   return `https://www.drivenc.gov/map/Cctv/${id}`;
@@ -81,35 +90,35 @@ function setFeatureCamera(nextFeature) {
   });
 }
 
-function stopTilePlayback(tile) {
-  tile._playbackGeneration = (tile._playbackGeneration || 0) + 1;
-
-  if (tile._hlsWatchdog) {
-    clearTimeout(tile._hlsWatchdog);
-    tile._hlsWatchdog = null;
+function disposeTileResources(tile) {
+  tile._streamUrl = null;
+  const playback = tile._playbackState;
+  if (playback) {
+    playback.disposed = true;
+    clearTimeout(playback.connectTimer);
+    clearInterval(playback.stallTimer);
+    playback.hls?.destroy();
+    playback.video?.pause();
+    playback.video?.removeAttribute("src");
+    playback.video?.load();
+    tile._playbackState = null;
   }
 
-  if (tile._hls) {
-    tile._hls.destroy();
-    tile._hls = null;
-  }
-
-  const video = tile.querySelector(".media video");
-  if (video) {
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-  }
+  // A playback-failure retry is tile-scoped and intentionally survives
+  // routine image/video renders until its targeted Worker refresh fires.
 }
 
-function renderFallbackSnapshot(tile, safeFallbackUrl = viewerUrl(tile.dataset.id)) {
-  renderImage(tile, safeFallbackUrl);
+function renderFallbackSnapshot(
+  tile,
+  { url = viewerUrl(tile.dataset.id), error = false } = {}
+) {
+  renderImage(tile, url, { error });
 }
 
-function renderImage(tile, imageUrl) {
-  tile.classList.add("live");
-  tile.classList.remove("error");
-  stopTilePlayback(tile);
+function renderImage(tile, imageUrl, { error = false } = {}) {
+  disposeTileResources(tile);
+  tile.classList.toggle("live", !error);
+  tile.classList.toggle("error", error);
   const media = tile.querySelector(".media");
   let img = media.querySelector("img");
   if (!img) {
@@ -123,120 +132,304 @@ function renderImage(tile, imageUrl) {
   img.src = `${imageUrl}${sep}_ts=${Date.now()}`;
 }
 
-// NCDOT's streaming servers have brief (few-second) manifest/segment blips
-// fairly often even on healthy cameras; give hls.js's own internal retry
-// backoff room to ride those out before we give up on this attempt.
-const HLS_CONNECT_TIMEOUT_MS = 18_000;
-
 // NCDOT camera feeds are HLS (.m3u8) live streams. Safari/iOS play HLS
 // natively via <video src>; everywhere else needs hls.js (loaded in index.html).
 function renderHlsStream(tile, streamUrl) {
   const media = tile.querySelector(".media");
   const existing = media.querySelector("video");
-  if (existing && existing.dataset.src === streamUrl) {
+  if (
+    existing &&
+    tile._streamUrl === streamUrl &&
+    tile._playbackState &&
+    !tile._playbackState.disposed
+  ) {
     return; // already attached to this exact stream, nothing to do
   }
 
-  stopTilePlayback(tile);
-  const playbackGeneration = tile._playbackGeneration;
+  disposeTileResources(tile);
   media.innerHTML = "";
   const video = document.createElement("video");
   video.autoplay = true;
   video.muted = true;
   video.playsInline = true;
   video.crossOrigin = "anonymous";
-  video.dataset.src = streamUrl;
+  tile._streamUrl = streamUrl;
   media.appendChild(video);
 
-  let failed = false;
+  const playback = {
+    disposed: false,
+    failed: false,
+    hls: null,
+    video,
+    connectTimer: null,
+    stallTimer: null,
+    lastMediaTime: 0,
+    lastProgressAt: Date.now(),
+  };
+  tile._playbackState = playback;
 
   // A manifest can parse successfully (or `loadedmetadata` can fire) without
   // a single frame ever actually decoding — a dead or stalled upstream just
-  // sits there black forever with no error event. Only trust an explicit
-  // `playing` event as "actually live", and give it a window to get there
-  // before giving up and falling back to the viewer iframe.
+  // sits there black forever with no error event. Track both the initial
+  // `playing` event and continued media-time progress so a wall left running
+  // can recover instead of freezing forever on its last frame.
   const markLive = () => {
-    if (failed || tile._playbackGeneration !== playbackGeneration) return;
-    clearTimeout(tile._hlsWatchdog);
-    tile._hlsWatchdog = null;
+    if (playback.disposed || playback.failed) return;
+    playback.lastMediaTime = video.currentTime;
+    playback.lastProgressAt = Date.now();
+    clearTimeout(playback.connectTimer);
+    playback.connectTimer = null;
+    if (tile._streamRetryTimer) {
+      clearTimeout(tile._streamRetryTimer);
+      tile._streamRetryTimer = null;
+    }
     tile.classList.add("live");
     tile.classList.remove("error");
   };
-  const markFailed = () => {
-    if (failed || tile._playbackGeneration !== playbackGeneration) return;
-    failed = true;
-    clearTimeout(tile._hlsWatchdog);
-    tile._hlsWatchdog = null;
-    console.warn(`HLS playback failed/stalled for camera ${tile.dataset.id}, falling back to snapshot`);
-    markError(tile);
-    renderFallbackSnapshot(tile);
+
+  const markFailed = (
+    reason = "unknown playback failure",
+    { retry = true } = {}
+  ) => {
+    if (playback.disposed || playback.failed) return;
+    playback.failed = true;
+    console.warn(
+      `HLS playback failed/stalled for camera ${tile.dataset.id} (${reason}); ${
+        retry ? "retrying shortly" : "using fallback"
+      }`
+    );
+    renderFallbackSnapshot(tile, { error: true });
+
+    if (tile._streamRetryTimer) {
+      clearTimeout(tile._streamRetryTimer);
+      tile._streamRetryTimer = null;
+    }
+    if (retry) {
+      tile._streamRetryTimer = setTimeout(() => {
+        tile._streamRetryTimer = null;
+        refreshCameraMetaNow({
+          forceHealthCheck: true,
+          cameraId: tile.dataset.id,
+        });
+      }, CAMERA_UNAVAILABLE_RETRY_MS);
+    }
   };
 
-  tile._hlsWatchdog = setTimeout(markFailed, HLS_CONNECT_TIMEOUT_MS);
+  playback.connectTimer = setTimeout(
+    () => markFailed("initial connection timeout"),
+    HLS_CONNECT_TIMEOUT_MS
+  );
 
-  video.addEventListener("playing", markLive);
-  video.addEventListener("error", markFailed, { once: true });
+  playback.stallTimer = setInterval(() => {
+    if (playback.disposed || playback.failed) return;
 
-  if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = streamUrl;
-    video.play().catch(() => {});
-  } else if (window.Hls && window.Hls.isSupported()) {
-    const hls = new window.Hls({ liveSyncDurationCount: 3 });
-    tile._hls = hls;
-    hls.loadSource(streamUrl);
-    hls.attachMedia(video);
-    hls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
-    hls.on(window.Hls.Events.ERROR, (_evt, data) => {
-      if (data.fatal) markFailed();
-    });
-  } else {
-    markFailed();
-  }
-}
-
-function markError(tile) {
-  tile.classList.add("error");
-  tile.classList.remove("live");
-}
-
-async function refreshCameraMeta() {
-  let payload = [];
-  try {
-    const res = await fetch(CAMERA_API_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`camera API returned ${res.status}`);
-    payload = await res.json();
-  } catch (err) {
-    console.warn("Camera metadata fetch failed, using viewer-page fallback for all tiles:", err);
-    payload = [];
-  }
-
-  const byId = new Map(payload.map((c) => [String(c.id), c]));
-
-  document.querySelectorAll(".camera-tile").forEach((tile) => {
-    const id = tile.dataset.id;
-    const data = byId.get(id);
-
-    // `hlsAvailable: true` is the Worker's explicit attestation that it just
-    // received a valid 2xx HLS manifest. Never trust a raw videoUrl without
-    // that marker; this prevents an NCDOT HTTP Basic challenge from reaching
-    // the browser when its streaming origins are unavailable.
-    if (!data || (!data.hlsAvailable && !data.imageUrl)) {
-      renderFallbackSnapshot(tile, data?.fallbackUrl || viewerUrl(id));
+    // Browsers deliberately throttle or suspend hidden tabs. Reset the
+    // baseline while hidden instead of treating normal suspension as a stall.
+    if (document.hidden) {
+      playback.lastMediaTime = video.currentTime;
+      playback.lastProgressAt = Date.now();
       return;
     }
 
-    try {
-      if (data.hlsAvailable && data.videoUrl) {
-        renderHlsStream(tile, data.videoUrl);
-      } else {
-        renderImage(tile, data.imageUrl);
-      }
-    } catch (err) {
-      console.warn(`Failed to render camera ${id}:`, err);
-      markError(tile);
-      renderFallbackSnapshot(tile);
+    if (Math.abs(video.currentTime - playback.lastMediaTime) > 0.05) {
+      playback.lastMediaTime = video.currentTime;
+      playback.lastProgressAt = Date.now();
+      return;
     }
-  });
+
+    if (Date.now() - playback.lastProgressAt >= HLS_STALL_TIMEOUT_MS) {
+      markFailed("no media-time progress");
+    }
+  }, HLS_STALL_CHECK_MS);
+
+  video.addEventListener("playing", markLive);
+  video.addEventListener("error", () =>
+    markFailed(video.error?.message || "video element error")
+  );
+
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = streamUrl;
+    video.play().catch((err) =>
+      markFailed(err?.message || "autoplay rejected")
+    );
+  } else if (window.Hls && window.Hls.isSupported()) {
+    const hls = new window.Hls({ liveSyncDurationCount: 3 });
+    playback.hls = hls;
+    hls.loadSource(streamUrl);
+    hls.attachMedia(video);
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () =>
+      video.play().catch((err) =>
+        markFailed(err?.message || "autoplay rejected")
+      )
+    );
+    hls.on(window.Hls.Events.ERROR, (_evt, data) => {
+      if (data.fatal) markFailed(`${data.type}: ${data.details}`);
+    });
+  } else {
+    markFailed("HLS playback is unavailable in this browser", {
+      retry: false,
+    });
+  }
+}
+
+function scheduleCameraRefresh(delayMs) {
+  const safeDelay = Math.max(1_000, delayMs);
+  const dueAt = Date.now() + safeDelay;
+
+  // A playback failure may already have scheduled an earlier recovery check.
+  // Keep that timer instead of postponing it with a routine token renewal.
+  if (cameraRefreshTimer && cameraRefreshDueAt <= dueAt) return;
+
+  if (cameraRefreshTimer) clearTimeout(cameraRefreshTimer);
+  cameraRefreshDueAt = dueAt;
+  cameraRefreshTimer = setTimeout(() => {
+    cameraRefreshTimer = null;
+    cameraRefreshDueAt = 0;
+    refreshCameraMeta();
+  }, safeDelay);
+}
+
+async function refreshCameraMeta({
+  forceHealthCheck = false,
+  cameraId = null,
+} = {}) {
+  const forceCameraId = String(cameraId ?? "");
+  const forceTargetIsValid =
+    forceHealthCheck &&
+    CAMERAS.some((camera) => String(camera.id) === forceCameraId);
+
+  if (cameraRefreshInFlight) {
+    if (forceTargetIsValid) pendingForcedCameraIds.add(forceCameraId);
+    return;
+  }
+  cameraRefreshInFlight = true;
+
+  let payload = [];
+  let metadataAvailable = false;
+  let nextRefreshMs = CAMERA_UNAVAILABLE_RETRY_MS;
+  const controller = new AbortController();
+  const requestTimeout = setTimeout(
+    () => controller.abort(),
+    CAMERA_API_TIMEOUT_MS
+  );
+
+  try {
+    const params = new URLSearchParams();
+    if (forceTargetIsValid) {
+      params.set("refresh", "1");
+      params.set("cameraId", forceCameraId);
+    }
+    const query = params.toString();
+    const apiUrl = query ? `${CAMERA_API_URL}?${query}` : CAMERA_API_URL;
+    const res = await fetch(apiUrl, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`camera API returned ${res.status}`);
+    payload = await res.json();
+    if (!Array.isArray(payload)) {
+      throw new Error("camera API returned an invalid payload");
+    }
+    metadataAvailable = true;
+  } catch (err) {
+    console.warn(
+      "Camera metadata fetch failed; preserving current tile state:",
+      err
+    );
+  } finally {
+    clearTimeout(requestTimeout);
+  }
+
+  try {
+    if (!metadataAvailable) return;
+
+    nextRefreshMs =
+      payload.length === 0
+        ? CAMERA_UNAVAILABLE_RETRY_MS
+        : CAMERA_META_REFRESH_MS;
+    const byId = new Map(
+      payload
+        .filter((camera) => camera?.id != null)
+        .map((camera) => [String(camera.id), camera])
+    );
+
+    document.querySelectorAll(".camera-tile").forEach((tile) => {
+      const id = tile.dataset.id;
+      const data = byId.get(id);
+      const hasUsableMedia = data?.hlsAvailable
+        ? Boolean(data.videoUrl)
+        : Boolean(data?.imageUrl);
+
+      // A partial response must not tear down a stream that is still
+      // advancing. Its own fatal-error/stall monitor remains authoritative.
+      if (!data || !hasUsableMedia) {
+        if (!tile.querySelector("video, img")) {
+          renderFallbackSnapshot(tile, {
+            url: data?.fallbackUrl || viewerUrl(id),
+          });
+        }
+        nextRefreshMs = Math.min(nextRefreshMs, CAMERA_UNAVAILABLE_RETRY_MS);
+        return;
+      }
+
+      try {
+        // Only the Worker's signed-and-probed availability marker authorizes
+        // a video URL. An unsigned NCDOT Basic challenge never reaches media.
+        if (data.hlsAvailable && data.videoUrl) {
+          renderHlsStream(tile, data.videoUrl);
+          const serverRefreshMs = Number(data.refreshAfterMs);
+          nextRefreshMs = Math.min(
+            nextRefreshMs,
+            Number.isFinite(serverRefreshMs)
+              ? Math.max(
+                  1_000,
+                  Math.min(CAMERA_META_REFRESH_MS, serverRefreshMs)
+                )
+              : CAMERA_META_REFRESH_MS
+          );
+        } else {
+          renderImage(tile, data.imageUrl, {
+            error: Boolean(data.retryHls),
+          });
+          nextRefreshMs = Math.min(
+            nextRefreshMs,
+            CAMERA_UNAVAILABLE_RETRY_MS
+          );
+        }
+      } catch {
+        console.warn(`Failed to render camera ${id}`);
+        renderFallbackSnapshot(tile, { error: true });
+        nextRefreshMs = Math.min(
+          nextRefreshMs,
+          CAMERA_UNAVAILABLE_RETRY_MS
+        );
+      }
+    });
+  } finally {
+    cameraRefreshInFlight = false;
+
+    const pendingCameraId = pendingForcedCameraIds.values().next().value;
+    if (pendingCameraId) {
+      pendingForcedCameraIds.delete(pendingCameraId);
+      void refreshCameraMeta({
+        forceHealthCheck: true,
+        cameraId: pendingCameraId,
+      });
+      return;
+    }
+
+    scheduleCameraRefresh(nextRefreshMs);
+  }
+}
+
+function refreshCameraMetaNow({
+  forceHealthCheck = false,
+  cameraId = null,
+} = {}) {
+  if (cameraRefreshTimer) clearTimeout(cameraRefreshTimer);
+  cameraRefreshTimer = null;
+  cameraRefreshDueAt = 0;
+  void refreshCameraMeta({ forceHealthCheck, cameraId });
 }
 
 function init() {
@@ -250,7 +443,20 @@ function init() {
   document.querySelectorAll(".camera-tile").forEach((tile) => renderFallbackSnapshot(tile));
 
   refreshCameraMeta();
-  setInterval(refreshCameraMeta, CAMERA_META_REFRESH_MS);
+
+  window.addEventListener("online", () => refreshCameraMetaNow());
+  window.addEventListener("focus", () => refreshCameraMetaNow());
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+
+    document.querySelectorAll(".camera-tile").forEach((tile) => {
+      const playback = tile._playbackState;
+      if (!playback || playback.disposed) return;
+      playback.lastMediaTime = playback.video.currentTime;
+      playback.lastProgressAt = Date.now();
+    });
+    refreshCameraMetaNow();
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);
