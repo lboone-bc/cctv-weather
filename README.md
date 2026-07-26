@@ -349,7 +349,7 @@ wall. No dashboard build-settings changes should be needed. One thing to set:
 Current production wall:
 [cctv-weather.lboone.workers.dev](https://cctv-weather.lboone.workers.dev/),
 directly deployed with Wrangler on **2026-07-26** as version
-`e37264fb-19dc-4cd8-a6c1-df1d06742fc9`.
+`166acc0f-6e43-4d0a-a4f7-2ea0d8e08e1f`.
 
 - In the Cloudflare dashboard, open the Worker's **Settings → Variables and
   Secrets** and add `DRIVENC_API_KEY` as an encrypted secret (Production —
