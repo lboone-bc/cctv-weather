@@ -9,13 +9,21 @@ static assets).
 ## Status / open TODOs
 
 The DriveNC Cameras API has been called live with a real key and all 12
-cameras confirmed working — see [Cameras](#cameras) below for how the
-mapping was resolved. Remaining items:
+camera mappings have been confirmed — see [Cameras](#cameras) below for how
+the mapping was resolved. HLS availability is intentionally treated as
+dynamic. On July 26, 2026, NCDOT's HLS origins began returning `401
+Unauthorized` with an `XEngine` HTTP Basic-auth challenge; that is an
+upstream streaming-service outage, not a request for a DriveNC website
+login. The Worker now probes every manifest server-side and gives the
+browser a direct HLS URL only after receiving a valid 2xx HLS playlist.
+Unavailable feeds remain on the public DriveNC image fallback, so the wall
+does not open a browser credential dialog. Remaining items:
 
-- [x] Confirmed `drivenc.gov/map/Cctv/{id}` viewer pages are iframe-embeddable
-      (no blocking `X-Frame-Options`/CSP) — verified visually via the local
-      fallback rendering. This is the path used whenever `/api/cameras`
-      hasn't responded yet or a stream fails to play.
+- [x] Confirmed `drivenc.gov/map/Cctv/{id}` returns a public camera image —
+      verified visually via the local fallback rendering. This is the path
+      used whenever `/api/cameras`
+      hasn't responded yet, the Worker's manifest probe does not receive a
+      valid 2xx HLS playlist, or a verified stream subsequently fails.
 - [ ] Watch the wall run for a while and confirm 12 simultaneous HLS streams
       don't overload whatever device is driving the TV (a low-power
       stick/smart-TV browser may struggle — if so, consider showing fewer
@@ -26,20 +34,36 @@ mapping was resolved. Remaining items:
       re-checking, not just a one-time setup step.
 
 Until the key is set in the deployed environment, every tile falls back to
-a scaled-down `<iframe>` of its public `drivenc.gov` viewer page, so the
-wall is functional even without it. Individual cameras also fall back
-per-tile, automatically, whenever their HLS stream fails to start playing
-within ~18s (NCDOT's streaming servers have brief, self-resolving blips even
-on healthy cameras — confirmed by direct testing, not a bug here) — a
-90-second refresh cycle retries and upgrades them back to live video once
-the stream recovers. Click any camera tile to make it the large feature feed;
+a public DriveNC camera image, so the wall is functional even without it.
+Individual cameras also fall back
+per-tile whenever the server-side manifest probe fails or their verified HLS
+stream does not start playing within ~18s. A 90-second browser refresh cycle
+retries the Worker, whose HLS-health decision is cached for at most 10
+seconds, and upgrades the tile back to HLS automatically once the manifest
+is healthy again. Click any camera tile to make it the large feature feed;
 the existing media player stays attached while the grid rearranges.
+
+### If an NCDOT/XEngine login prompt appears
+
+Do not enter a DriveNC username or password. The prompt comes from NCDOT's
+separate HLS streaming origin on port 8887, while this application uses only
+the developer API key stored as `DRIVENC_API_KEY` to fetch camera metadata.
+A normal DriveNC account credential is neither required nor accepted for HLS
+playback and must not be added to Cloudflare.
+
+The current code prevents a known 401 manifest from reaching the browser:
+`/api/cameras` returns that camera with `hlsAvailable: false`,
+`videoUrl: null`, and its safe `fallbackUrl`. Responses are `Cache-Control:
+no-store`; the Worker owns the 90-second camera-metadata cache and 10-second
+HLS-health cache. If an already-open tab predates this fix, close it before
+opening the updated wall so its old HLS player cannot continue retrying the
+challenged origin.
 
 ### Secrets keep disappearing — known Cloudflare bug
 
 `DRIVENC_API_KEY` has been wiped from the Worker's dashboard settings
 multiple times during development, each time reverting every camera to the
-iframe fallback (`/api/cameras` starts returning `[]` with **HTTP 200** —
+snapshot fallback (`/api/cameras` starts returning `[]` with **HTTP 200** —
 that specific response, empty array + status 200 rather than 502, only
 comes from the `if (!key)` branch in `src/worker.js`, so it's a reliable
 signal the secret is missing).
@@ -51,7 +75,7 @@ documented to leave secrets untouched. See
 [cloudflare/workers-sdk#8871](https://github.com/cloudflare/workers-sdk/issues/8871).
 There's no confirmed permanent fix as of this writing.
 
-**If cameras suddenly all show the iframe fallback again:**
+**If cameras suddenly all show the snapshot fallback again:**
 
 1. Check `https://cctv-weather.lboone.workers.dev/api/cameras` — `[]` with
    HTTP 200 confirms the secret is gone (give it ~10s after any dashboard
@@ -77,11 +101,13 @@ each requested camera's road/mile-marker/cross-street against the API's
 `Location`, `Roadway`, `Direction`, and lat/lon fields for Buncombe and
 Henderson counties. Confirmed via a live `curl`:
 
-- Each camera's `Views[0].VideoUrl` is a working, publicly-reachable **HLS
-  (.m3u8) live stream** (no auth required) — e.g.
+- Each camera's `Views[0].VideoUrl` supplied a publicly reachable **HLS
+  (.m3u8) live stream** when the roster was originally verified — e.g.
   `https://cfase01.services.ncdot.gov:8887/chan-5378_l/index.m3u8` for I-26
-  MM37. `src/worker.js` and `public/cameras.js` were updated accordingly
-  (`renderHlsStream()` uses native HLS on Safari, `hls.js` everywhere else).
+  MM37. Availability can change independently of the DriveNC camera status,
+  so `src/worker.js` now validates each playlist before
+  `public/cameras.js` is allowed to call `renderHlsStream()` (which uses
+  native HLS on Safari and `hls.js` everywhere else).
 - The exact "MM39" camera unit (Id 4851) has no video feed populated: the
   nearest live camera (`CCTV13-I26-39.6E`, Id 5269) was used instead.
 - The public DriveNC URL `https://www.drivenc.gov/2da52ce8-5049-4024-8a6d-04b949ca9daa`
@@ -100,14 +126,16 @@ Browser (TV) ──> public/index.html / style.css / cameras.js / weather.js
          /api/cameras itself, otherwise
          falls through to static assets)
                      │
-                     │ GET .../get/cameras?key=... (server-side only)
-                     ▼
-              DriveNC Cameras API
+                     ├── GET .../get/cameras?key=... (server-side only)
+                     │        DriveNC Cameras API
+                     │
+                     └── GET each HLS manifest (server-side health probe)
+                              NCDOT streaming origins
 ```
 
 - **Deployment model:** this repo deploys as a single Cloudflare **Worker
   with static assets** (`wrangler.jsonc`: `main: src/worker.js`,
-  `assets.directory: ./public`), not the older Pages-Functions
+  `assets.directory: ./public`, `name: cctv-weather`), not the older Pages-Functions
   (`/functions` directory) convention. Cloudflare's Git-integration build
   pipeline for this project runs `npx wrangler deploy`, which needs exactly
   this shape — a single entry-point script plus an assets directory — so
@@ -117,7 +145,10 @@ Browser (TV) ──> public/index.html / style.css / cameras.js / weather.js
   `src/worker.js` so the API key never reaches the browser and so repeated
   page refreshes across however many TVs are running this don't exceed
   DriveNC's **10 requests / 60 seconds** rate limit — the Worker caches the
-  upstream response for 90 seconds.
+  upstream camera metadata for 90 seconds. It separately fetches each HLS
+  manifest and exposes a direct stream URL only when the response is 2xx and
+  begins with a valid `#EXTM3U` playlist marker. Health decisions are cached
+  for 10 seconds; `/api/cameras` itself is always `Cache-Control: no-store`.
 - **Weather** (current conditions + forecast) comes straight from the client
   to `api.weather.gov` (NWS) — free, no API key. Flow: `/points/{lat},{lon}`
   → forecast URL + nearest observation station → `/observations/latest`.
@@ -165,9 +196,10 @@ Initial priority camera (rendered as a large 3×3 hero, top-left of the grid):
 
 | Label | DriveNC Id | Live stream |
 |---|---|---|
-| **I-26 MM37 — Long Shoals Rd** | `4208` | ✅ HLS confirmed |
+| **I-26 MM37 — Long Shoals Rd** | `4208` | HLS dynamically health-checked |
 
-Remaining cameras (all confirmed with live HLS streams as of this writing):
+Remaining selected cameras (all had live HLS streams when originally
+verified; current playback depends on the Worker's live manifest probe):
 
 | Label | DriveNC Id | Notes |
 |---|---|---|
@@ -183,7 +215,7 @@ Remaining cameras (all confirmed with live HLS streams as of this writing):
 | US-25 — Gerber Village | `4223` | |
 | Airport Rd — Fanning Bridge Rd | `4203` | |
 
-Viewer page (iframe fallback) for any camera: `https://www.drivenc.gov/map/Cctv/{id}`.
+Image fallback for any camera: `https://www.drivenc.gov/map/Cctv/{id}`.
 
 To add/remove/reorder cameras: edit `CAMERAS` in `public/cameras.js` and
 `WANTED_CAMERA_IDS` in `src/worker.js` (both need the numeric DriveNC `Id`;
@@ -202,6 +234,9 @@ drivenc.gov viewer URL.
    <https://www.drivenc.gov/developers/doc>.
 2. Don't put the key in any file in this repo. It's supplied as an
    environment variable (see below).
+3. Store only that developer API key in Cloudflare. A DriveNC account
+   username/password does not authenticate the separate HLS service and must
+   not be stored in Worker variables.
 
 ### 2. Local development
 
@@ -219,8 +254,9 @@ variable name.)
 This repo is already connected to Cloudflare's Git integration
 (`lboone-bc/cctv-weather` → a Workers project) and deploys on every push to
 `main` by running `npx wrangler deploy`, which `wrangler.jsonc` now points at
-`src/worker.js` + `./public` assets, so no dashboard build-settings changes
-should be needed. One thing to set:
+the existing `cctv-weather` Worker with `src/worker.js` + `./public` assets,
+so a direct Wrangler deploy and the Git pipeline target the same production
+wall. No dashboard build-settings changes should be needed. One thing to set:
 
 - In the Cloudflare dashboard, open the Worker's **Settings → Variables and
   Secrets** and add `DRIVENC_API_KEY` as an encrypted secret (Production —

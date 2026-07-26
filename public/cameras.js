@@ -81,61 +81,42 @@ function setFeatureCamera(nextFeature) {
   });
 }
 
-// The drivenc.gov viewer page renders at its own natural desktop size —
-// embedded at 100%/100% it just shows an unscaled, cropped fragment (the
-// page's own oversized header text filling the whole tile). Instead, size
-// the iframe to that natural viewport and scale the whole thing down to
-// cover the tile, so it reads as "a small view of their page" rather than
-// "zoomed into one corner of it".
-const IFRAME_NATURAL_WIDTH = 1600;
-const IFRAME_NATURAL_HEIGHT = 1000;
+function stopTilePlayback(tile) {
+  tile._playbackGeneration = (tile._playbackGeneration || 0) + 1;
 
-function renderFallbackIframe(tile) {
-  const id = tile.dataset.id;
-  tile.classList.remove("live", "error");
-  const media = tile.querySelector(".media");
-  media.innerHTML = "";
+  if (tile._hlsWatchdog) {
+    clearTimeout(tile._hlsWatchdog);
+    tile._hlsWatchdog = null;
+  }
 
-  const iframe = document.createElement("iframe");
-  iframe.src = viewerUrl(id);
-  iframe.loading = "lazy";
-  iframe.title = tile.querySelector(".label").textContent;
-  Object.assign(iframe.style, {
-    position: "absolute",
-    top: "0",
-    left: "0",
-    width: `${IFRAME_NATURAL_WIDTH}px`,
-    height: `${IFRAME_NATURAL_HEIGHT}px`,
-    transformOrigin: "top left",
-    border: "0",
-  });
-  media.appendChild(iframe);
+  if (tile._hls) {
+    tile._hls.destroy();
+    tile._hls = null;
+  }
 
-  const scaleToFit = () => {
-    const rect = tile.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const scale = Math.max(rect.width / IFRAME_NATURAL_WIDTH, rect.height / IFRAME_NATURAL_HEIGHT);
-    iframe.style.transform = `scale(${scale})`;
-  };
-  scaleToFit();
+  const video = tile.querySelector(".media video");
+  if (video) {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
+}
 
-  // Tile size can change (grid reflow on load, priority tile is 3x3, etc.);
-  // keep the scale in sync rather than computing it once and going stale.
-  if (tile._fallbackResizeObserver) tile._fallbackResizeObserver.disconnect();
-  const ro = new ResizeObserver(scaleToFit);
-  ro.observe(tile);
-  tile._fallbackResizeObserver = ro;
+function renderFallbackSnapshot(tile, safeFallbackUrl = viewerUrl(tile.dataset.id)) {
+  renderImage(tile, safeFallbackUrl);
 }
 
 function renderImage(tile, imageUrl) {
   tile.classList.add("live");
   tile.classList.remove("error");
+  stopTilePlayback(tile);
   const media = tile.querySelector(".media");
   let img = media.querySelector("img");
   if (!img) {
     media.innerHTML = "";
     img = document.createElement("img");
     img.alt = tile.querySelector(".label").textContent;
+    img.decoding = "async";
     media.appendChild(img);
   }
   const sep = imageUrl.includes("?") ? "&" : "?";
@@ -156,15 +137,18 @@ function renderHlsStream(tile, streamUrl) {
     return; // already attached to this exact stream, nothing to do
   }
 
+  stopTilePlayback(tile);
+  const playbackGeneration = tile._playbackGeneration;
   media.innerHTML = "";
   const video = document.createElement("video");
   video.autoplay = true;
   video.muted = true;
   video.playsInline = true;
+  video.crossOrigin = "anonymous";
   video.dataset.src = streamUrl;
   media.appendChild(video);
 
-  let settled = false;
+  let failed = false;
 
   // A manifest can parse successfully (or `loadedmetadata` can fire) without
   // a single frame ever actually decoding — a dead or stalled upstream just
@@ -172,22 +156,23 @@ function renderHlsStream(tile, streamUrl) {
   // `playing` event as "actually live", and give it a window to get there
   // before giving up and falling back to the viewer iframe.
   const markLive = () => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(watchdog);
+    if (failed || tile._playbackGeneration !== playbackGeneration) return;
+    clearTimeout(tile._hlsWatchdog);
+    tile._hlsWatchdog = null;
     tile.classList.add("live");
     tile.classList.remove("error");
   };
   const markFailed = () => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(watchdog);
-    console.warn(`HLS playback failed/stalled for camera ${tile.dataset.id}, falling back to viewer iframe`);
+    if (failed || tile._playbackGeneration !== playbackGeneration) return;
+    failed = true;
+    clearTimeout(tile._hlsWatchdog);
+    tile._hlsWatchdog = null;
+    console.warn(`HLS playback failed/stalled for camera ${tile.dataset.id}, falling back to snapshot`);
     markError(tile);
-    renderFallbackIframe(tile);
+    renderFallbackSnapshot(tile);
   };
 
-  const watchdog = setTimeout(markFailed, HLS_CONNECT_TIMEOUT_MS);
+  tile._hlsWatchdog = setTimeout(markFailed, HLS_CONNECT_TIMEOUT_MS);
 
   video.addEventListener("playing", markLive);
   video.addEventListener("error", markFailed, { once: true });
@@ -197,6 +182,7 @@ function renderHlsStream(tile, streamUrl) {
     video.play().catch(() => {});
   } else if (window.Hls && window.Hls.isSupported()) {
     const hls = new window.Hls({ liveSyncDurationCount: 3 });
+    tile._hls = hls;
     hls.loadSource(streamUrl);
     hls.attachMedia(video);
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
@@ -230,13 +216,17 @@ async function refreshCameraMeta() {
     const id = tile.dataset.id;
     const data = byId.get(id);
 
-    if (!data || (!data.videoUrl && !data.imageUrl)) {
-      renderFallbackIframe(tile);
+    // `hlsAvailable: true` is the Worker's explicit attestation that it just
+    // received a valid 2xx HLS manifest. Never trust a raw videoUrl without
+    // that marker; this prevents an NCDOT HTTP Basic challenge from reaching
+    // the browser when its streaming origins are unavailable.
+    if (!data || (!data.hlsAvailable && !data.imageUrl)) {
+      renderFallbackSnapshot(tile, data?.fallbackUrl || viewerUrl(id));
       return;
     }
 
     try {
-      if (data.videoUrl) {
+      if (data.hlsAvailable && data.videoUrl) {
         renderHlsStream(tile, data.videoUrl);
       } else {
         renderImage(tile, data.imageUrl);
@@ -244,7 +234,7 @@ async function refreshCameraMeta() {
     } catch (err) {
       console.warn(`Failed to render camera ${id}:`, err);
       markError(tile);
-      renderFallbackIframe(tile);
+      renderFallbackSnapshot(tile);
     }
   });
 }
@@ -255,9 +245,9 @@ function init() {
     grid.appendChild(buildTile(cam, index));
   });
 
-  // Render fallback iframes immediately so the wall is useful the instant
-  // it loads, then upgrade tiles to live HLS streams once /api/cameras responds.
-  document.querySelectorAll(".camera-tile").forEach(renderFallbackIframe);
+  // Render public DriveNC snapshots immediately, then upgrade only the feeds
+  // whose HLS manifests the Worker has verified as healthy.
+  document.querySelectorAll(".camera-tile").forEach((tile) => renderFallbackSnapshot(tile));
 
   refreshCameraMeta();
   setInterval(refreshCameraMeta, CAMERA_META_REFRESH_MS);
